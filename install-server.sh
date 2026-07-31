@@ -282,7 +282,33 @@ for label in "${LABELS[@]}"; do
   # bootout first so a re-run picks up a changed plist. A service that isn't
   # loaded makes bootout exit non-zero, which is expected, not a failure.
   launchctl bootout "gui/$(id -u)/${label}" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$plist"
+
+  # bootout returns before launchd has finished tearing the job down, and
+  # bootstrapping into that window fails with "Input/output error: 5". Under
+  # `set -e` that aborted the install with the service left UNLOADED — a
+  # re-run, whose whole promise is that it is safe, taking dictation down.
+  # Observed on a re-run, not theoretical. Wait for the label to actually
+  # leave the listing, then still retry: the wait is a heuristic, the retry
+  # is the guarantee.
+  for _ in $(seq 1 50); do
+    launchctl list | awk -v l="$label" '$NF == l { f = 1 } END { exit !f }' || break
+    sleep 0.1
+  done
+
+  loaded=0
+  for _ in $(seq 1 5); do
+    if launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null; then
+      loaded=1
+      break
+    fi
+    sleep 1
+  done
+  if (( loaded == 0 )); then
+    # Re-run without swallowing stderr, so the reason reaches the user.
+    launchctl bootstrap "gui/$(id -u)" "$plist" || true
+    err "could not bootstrap ${label} — it is NOT running."
+    exit 1
+  fi
   log "Loaded ${label}"
 done
 
