@@ -1,0 +1,382 @@
+# dictate
+
+Push-to-talk dictation into whatever has focus — most usefully a terminal
+session reached over SSH or mosh, but really anywhere: Slack, a browser, any
+text field. Hold **Ctrl+Alt+Space**, speak, release; the transcript lands on
+the clipboard and is pasted at the cursor.
+
+Transcription is local (whisper.cpp, model held resident). Audio never leaves
+your hardware — there is no cloud ASR and no account.
+
+macOS only, by construction: it is built out of launchd, AVAudioEngine,
+Hammerspoon, and macOS's TCC permission model.
+
+## Why off-the-shelf dictation apps can't do this
+
+Every consumer dictation app (Wispr Flow, superwhisper, VoiceInk, Hex, Handy,
+MacWhisper) injects text the same way: clipboard, then synthesize Cmd+V into
+the frontmost app. That breaks for a remote terminal session, and Wispr Flow's
+own docs say so outright:
+
+> "Direct paste is not supported in WSL terminals, SSH sessions, tmux, or
+> screen."
+
+Their workaround is a manual "paste last transcript" hotkey — i.e. not
+actually dictation-in-place. A shell or tmux keybinding can't substitute
+either: agentic CLIs like Claude Code paint their own input box (there is no
+readline buffer for a ZLE widget to hook), and any keybinding evaluated over
+SSH runs on the *remote* host, which has no microphone.
+
+`dictate` sidesteps this instead of fighting it. Capture and paste happen on
+the machine you are physically touching, so the pane you are looking at is
+the pane that receives the text. Nothing has to guess a target.
+
+## Architecture
+
+The default is a single Mac: everything below runs on it, bound to loopback,
+exposed to nothing.
+
+```
+⌃⌥Space held
+  └─► rec (AVAudioEngine) records the mic → 16 kHz mono WAV
+⌃⌥Space released
+  └─► POST /dictate ─────────────►  dictated  (HTTP service)
+        X-Dictate-Key                  │
+        Content-Type: audio/wav        ├─► RMS energy gate (silence → "")
+                                       ├─► whisper-server (model resident)
+                                       └─► sanitize (collapse to one line)
+                                  ◄── 200 {"text": "..."}
+  ├─► put the text on the clipboard
+  └─► synthesize ⌘V into the FOCUSED app
+        │
+        └─► terminal ──ssh/mosh──► tmux ──► the pane you're actually looking at
+```
+
+**Two machines is the same architecture with a different bind address.** If
+you want a laptop to record while a desktop holds the model resident, point
+the client at the desktop instead of at loopback — see "Two machines" below.
+There is no separate mode.
+
+The server does **not** try to guess which terminal pane to inject into, and
+does not inject anything itself — it only returns the transcript. The design
+spec's "REVISED" section explains why that guess (via `tmux list-clients` and
+`client_activity`) turned out to be actively wrong rather than merely fragile:
+the only available signal bumps on real keystrokes, so it tracks wherever you
+last *typed*, in a tool built to stop you typing.
+
+The clipboard is deliberately **not** restored after pasting: the transcript
+stays there, so a misfired paste is recoverable with a manual ⌘V instead of
+re-speaking. See the comment above `hs.pasteboard.setContents` in
+`client/init.lua` for why this should not be "fixed" later.
+
+## Install
+
+### 1. Server
+
+```bash
+brew install whisper-cpp uv
+
+# Fetch a model. large-v3-turbo is the default; any whisper.cpp GGML works.
+mkdir -p ~/.local/share/whisper-cpp
+curl -L -o ~/.local/share/whisper-cpp/ggml-large-v3-turbo.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
+
+# Render the launchd plists from config, then load them.
+uv run python -m dictated.plists
+for l in dictated whisper-server; do
+  launchctl bootout gui/$(id -u)/com.drycodeworks.$l 2>/dev/null
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.drycodeworks.$l.plist
+done
+
+curl -s http://127.0.0.1:8911/health    # {"status":"ok"}
+```
+
+| Service | Binds to | Logs |
+|---|---|---|
+| `whisper-server` | `127.0.0.1:8910` — loopback only, always | `/tmp/whisper-server.log`, `/tmp/whisper-server.err` |
+| `dictated` | `127.0.0.1:8911` by default, never `0.0.0.0` | `/tmp/dictated.log`, `/tmp/dictated.err` |
+
+The plists are **rendered from templates** in `launchd/`, not edited by hand,
+because launchd reads its own XML and cannot see `config.py` — so the two
+drift silently. `tests/test_launchd_config_sync.py` renders the templates and
+asserts they agree with config, including that `dictated` is never bound to
+`0.0.0.0` and that `whisper-server` is never bound off loopback.
+
+After changing anything in `~/.config/dictate/config.toml`, re-render and
+reload:
+
+```bash
+uv run python -m dictated.plists     # prints the reload commands
+```
+
+The shared secret is generated on the first request and persisted at
+`~/.config/dictated/key` (mode 600). It is never committed — it lives outside
+the repo entirely.
+
+### 2. Client
+
+```bash
+./client/setup.sh
+```
+
+It:
+
+1. installs `hammerspoon` (cask) via Homebrew if missing, and compiles
+   `client/rec.swift` to `~/.hammerspoon/rec` with `swiftc`,
+2. obtains the shared secret (locally, or over SSH for a two-machine setup),
+3. asks you nothing about microphones — `rec` records the system default
+   input, chosen in System Settings → Sound → Input,
+4. curls `/health` and tells you plainly if the server isn't reachable,
+5. writes `~/.hammerspoon/dictate-config.lua` (mode 600 — it holds the secret
+   in plaintext) and links `client/init.lua` to `~/.hammerspoon/init.lua`. If
+   that path already exists as a real file rather than a symlink, this is a
+   **hard stop** with the exact command to fix it, not a warning you can miss,
+6. **actually starts Hammerspoon with the new config loaded** — launching it
+   if it wasn't running, quitting and relaunching if it was. Hammerspoon does
+   not auto-reload its config, and installing a cask does not run the app.
+   This step being missing was once the entire cause of "holding the hotkey
+   does nothing at all",
+7. handles the two permissions below,
+8. finishes by running the same live checks as `--doctor` and refuses to print
+   "setup complete" if any fail.
+
+Safe to re-run at any time; every step checks current state first.
+
+### 3. Configuration
+
+Everything is optional — the defaults are the working single-machine setup.
+Copy `config.example.toml` to `~/.config/dictate/config.toml` to change the
+bind address, the model path, the silence threshold, or the vocabulary prompt.
+
+The **vocabulary prompt** is the cheapest accuracy win available: proper nouns
+and jargon that come back mangled usually come back correct once listed in
+`whisper.prompt`. It ships empty, because one person's jargon is another
+person's noise.
+
+### `./client/setup.sh --doctor`
+
+Read-only — changes nothing, exits non-zero if anything is wrong. Run it any
+time the hotkey stops working, instead of re-running the whole install:
+
+- Hammerspoon.app installed
+- Hammerspoon actually running
+- `~/.hammerspoon/init.lua` is a symlink to this repo's `client/init.lua`
+- `~/.hammerspoon/dictate-config.lua` exists, is mode 600, has a non-empty key
+- `rec` is built, and which binary `init.lua` would actually resolve
+- Hammerspoon can reach the microphone — read from
+  `~/.hammerspoon/.dictate-mic-status`, the outcome `client/init.lua`'s own
+  startup probe wrote. This is the only reliable signal: `--doctor`
+  deliberately does **not** run its own probe, since that would test the
+  *terminal's* microphone permission rather than Hammerspoon's — a different
+  grant, and a confidently wrong PASS.
+- the server's `/health` is reachable
+- the key **actually authenticates** — it POSTs a tiny silent WAV to
+  `/dictate` and checks the response isn't a 401
+
+Each `FAIL` line names its exact fix.
+
+`--doctor` does **not** check Accessibility. Only a real hotkey press confirms
+that one.
+
+## Two permissions setup.sh cannot grant for you
+
+Both need a human click in System Settings — macOS doesn't allow a script to
+flip either — but they work fundamentally differently, and `setup.sh` handles
+them differently on purpose. These two cost a full debugging session to
+understand, so they are worth reading before you hit them.
+
+1. **Accessibility** — needed for the global hotkey and for synthesizing the
+   ⌘V paste. Without it, `hs.hotkey.bind` silently never fires: no error, no
+   console message, nothing. This one **is** pre-grantable — the Accessibility
+   pane has a "+" button and lists every installed app whether or not it has
+   ever run — so `setup.sh` opens the pane and blocks until you confirm.
+
+2. **Microphone** — `rec` runs as Hammerspoon's *child process*, so macOS
+   attributes microphone access to **Hammerspoon**, not to `rec`. This one is
+   **not** pre-grantable: the Microphone pane has **no "+" button**. Unlike
+   Accessibility, it lists only apps that have *already requested* access.
+   Hammerspoon will not appear there — there is nothing to toggle — until
+   something has actually tried to open the mic.
+
+   So permission must be **triggered**, never pre-granted. `client/init.lua`
+   runs a short (~0.4s) `rec` probe on every config load, which is what fires
+   the consent dialog. On success it stays silent and writes `ok` to
+   `~/.hammerspoon/.dictate-mic-status`; on failure it shows a long-lived
+   alert, writes `denied`, and logs `rec`'s stderr. Once the probe has run
+   once, Hammerspoon **is** listed in the Microphone pane, so the recovery
+   path works.
+
+Then test for real: put your cursor at a shell prompt, hold **Ctrl+Alt+Space —
+all three keys together, not the spacebar alone**, say a short sentence,
+release. The sentence should appear at the prompt within a couple of seconds,
+**not executed**.
+
+## Two machines
+
+Useful when the Mac you type on can't spare 1.5 GB for a resident model.
+
+On the transcribing machine, set the bind address in
+`~/.config/dictate/config.toml` to a private address it is reachable at —
+a Tailscale/tailnet IP, a VPN address, or a LAN address you trust — then
+re-render and reload the plists:
+
+```toml
+[server]
+bind = "10.x.x.x"     # never 0.0.0.0
+```
+
+On the recording machine, point `server` in
+`~/.hammerspoon/dictate-config.lua` at the same address. `setup.sh` will offer
+to fetch the key over SSH.
+
+`whisper.host` stays loopback in both cases and is not configurable. It is the
+component that handles raw audio, and audio should not cross a network even a
+trusted one.
+
+## Changing the hotkey
+
+Edit the last real line of `client/init.lua`:
+
+```lua
+hs.hotkey.bind({ "ctrl", "alt" }, "space", startRecording, stopRecording)
+```
+
+Hammerspoon accepts the standard modifier names (`"cmd"`, `"alt"`, `"ctrl"`,
+`"shift"`, `"fn"`) and most key names as lowercase strings. Reload
+Hammerspoon's config after editing (menu bar icon → Reload Config).
+
+Avoid `{"cmd","alt"}` + `"space"` — that's macOS's Finder search shortcut, and
+the system wins that fight before Hammerspoon sees the event.
+
+The Fn/🌐 key needs a different mechanism entirely (an `hs.eventtap` watching
+`flagsChanged`, the Input Monitoring permission, and disabling the system's own
+Fn action). It is **not** a drop-in change to the `bind` call above.
+
+## Troubleshooting
+
+**Start here, every time:** `./client/setup.sh --doctor`. Most "nothing
+happens" reports are one of its checks, not a deeper bug.
+
+0. **Nothing happened, but `--doctor` passes everything.** Check you're
+   pressing **Ctrl+Alt+Space — all three keys together**. Then open the
+   Hammerspoon console (menu bar icon → Console) and look for a Lua error.
+   If Accessibility is missing, the hotkey silently never fires.
+1. **`/tmp/dictate.wav` is zero bytes, or the microphone check FAILs.** A
+   microphone permission problem almost every time: System Settings → Privacy
+   & Security → Microphone → Hammerspoon must be ON. If Hammerspoon isn't
+   listed at all, it hasn't asked yet — reload its config to re-run the probe.
+2. **A beep and an alert naming an HTTP status.** The alert names the likely
+   cause:
+   - **401** — the key in `~/.hammerspoon/dictate-config.lua` doesn't match
+     `~/.config/dictated/key` on the server. Re-run `client/setup.sh`.
+   - **415** — a client bug in the `Content-Type` header; shouldn't happen
+     with an unmodified `init.lua`.
+   - **400** — the server rejected the audio; usually the same mic-permission
+     issue as #1, caught server-side.
+   - **503** — `whisper-server` is down. Check `/tmp/whisper-server.err`.
+   - **Negative status / can't reach the server** — connection failure. Check
+     the network path and `launchctl list | grep dictated`.
+3. **The server side looks broken.** `tail -f /tmp/dictated.log` and
+   `/tmp/dictated.err` (server errors, and the length — never the content —
+   of each transcript); `/tmp/whisper-server.err` for ASR crashes.
+4. **It "works" but pastes nothing and says "heard nothing."** Not a bug: the
+   audio was too quiet to clear the energy gate. Whisper hallucinates
+   confident short phrases — famously "Thank you." — on silence, so this is
+   filtered on the *audio*, not on the text. Speak louder or closer, check the
+   input device, and see `SILENCE_RMS_THRESHOLD` below.
+
+**`~/.hammerspoon/dictate.log` is the load-bearing diagnostic.** Hammerspoon's
+`print()` reaches only the in-app console, which is not persisted and cannot be
+read out of band — a flake an hour old otherwise leaves zero evidence anywhere.
+`init.lua` appends `rec`'s exit code and stderr to that file on every non-zero
+exit.
+
+## What's been tested, and what hasn't
+
+One person, one pair of Macs, one microphone. The server side has a 61-test
+suite; the client side is exercised by real use, not by CI. Specifically worth
+knowing:
+
+**The silence threshold is calibrated against synthetic audio, not a real
+microphone.** `SILENCE_RMS_THRESHOLD = 150.0` sits ~16× above the noise floor
+that produces hallucinated text and ~21× below normal speech, measured with
+`say`-generated audio. It has not misfired in real use, but a different mic in
+a different room may need a different number. `dictated` logs the measured rms
+on every request precisely so you can calibrate from evidence instead of
+guessing. Aim for ~500+ for headroom.
+
+A related trap: **a call app that "hears you fine" is not proof your mic level
+is adequate.** Zoom and Meet apply their own automatic gain; `rec` reads the
+raw device with none, so an interface with a hardware gain knob may need it
+turned up.
+
+**First-word clipping.** Device-open latency, measured launch to first
+captured sample:
+
+| recorder | lead-in |
+|---|---|
+| `ffmpeg -f avfoundation` | ~1020–1365 ms |
+| `rec` (AVAudioEngine) | ~670 ms |
+
+670 ms is still enough to swallow a fast first word if you speak immediately on
+key-down. The remaining lever is pre-warming — keeping an audio engine running
+and only opening the file on key-down would cut this to near zero, at the cost
+of holding the microphone open (and lighting the menu-bar mic indicator)
+continuously. Not built: the privacy trade is real and should be a deliberate
+choice rather than a default.
+
+**End-to-end latency** has not been measured rigorously. If it feels
+consistently above ~2 seconds, the next lever is a faster model (Parakeet TDT
+benchmarks better than Whisper on both speed and accuracy), not
+micro-optimizing this pipeline.
+
+### Why capture is not ffmpeg
+
+Worth recording, because it cost a full session and the failure looked random.
+
+`ffmpeg -f avfoundation` failed to record roughly half the time, with:
+
+```
+[avfoundation @ 0x…] audio format is not supported
+```
+
+ffmpeg's avfoundation input accepts only **packed** sample layouts — f32, or
+signed 16/24/32-bit. Some interfaces offer exactly one physical layout at every
+one of their sample rates: *24-bit signed, unpacked in 4 bytes, high-aligned*.
+ffmpeg cannot consume that at all.
+
+It worked half the time because CoreAudio sometimes hands a capture client the
+device's **virtual** format (Float32, converted by the HAL) instead of its
+physical one, and which you get varies per open. Confirmed by diffing the
+CoreAudio unified log across a failing and a succeeding run — the failing one
+builds a converter targeting 24-bit unpacked and errors; the succeeding one
+stays Float32. Nothing else distinguished them.
+
+Nothing on the ffmpeg side fixes this: the avfoundation demuxer exposes no
+audio-format option (every knob it has is video-side), there is no packed
+format on the hardware to pin to, and avfoundation is ffmpeg's only macOS input
+backend. `AVAudioEngine`'s `inputNode` is Float32 by contract, so
+`client/rec.swift` cannot hit this failure mode.
+
+The first fix attempted — retry ffmpeg when it dies early — was wrong. A
+relaunch renegotiates the same format. Intermittent is not the same as
+transient.
+
+## Repo layout
+
+```
+client/
+  init.lua                    Hammerspoon client
+  rec.swift                   AVAudioEngine recorder, built by setup.sh
+  setup.sh                    client install + --doctor
+  dictate-config.example.lua  shape of ~/.hammerspoon/dictate-config.lua
+config.example.toml           shape of ~/.config/dictate/config.toml
+src/dictated/                 the HTTP service
+launchd/                      plist templates, rendered by dictated.plists
+tests/                        pytest suite (61 tests)
+docs/                         design spec + implementation plan
+```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

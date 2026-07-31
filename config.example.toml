@@ -1,0 +1,46 @@
+# dictate configuration — copy to ~/.config/dictate/config.toml
+#
+# Every value here has a working default. An absent config file gives you the
+# single-machine setup: record, transcribe and paste on one Mac, bound to
+# loopback. You only need this file to change something.
+
+[server]
+# Where `dictated` listens. Loopback is the default and is correct for a
+# single machine.
+#
+# For the two-machine setup (laptop records, desktop transcribes), set this to
+# the transcribing machine's private address — a Tailscale/tailnet IP, a VPN
+# address, or a LAN address you trust. The client then POSTs to that address.
+#
+# Never set this to 0.0.0.0. It would expose an endpoint that chooses the text
+# typed into your terminal to every network you are attached to. The plist
+# drift guard fails the test suite if you try.
+bind = "127.0.0.1"
+port = 8911
+
+[whisper]
+# The ASR server is loopback-only by construction and its host is not
+# configurable — raw audio must never leave the machine that recorded it.
+port = 8910
+
+# Path to a whisper.cpp GGML model. `~` is expanded.
+model = "~/.local/share/whisper-cpp/ggml-large-v3-turbo.bin"
+
+# Vocabulary biasing: whisper-server's --prompt seeds the decoder. This is the
+# cheapest accuracy win available — proper nouns and jargon that come back
+# mangled usually come back correct once listed here. Empty by default.
+#
+# Use your own terms, not these. Example:
+# prompt = "Technical dictation. Vocabulary: Postgres, Kubernetes, Terraform, tmux, repo, PR, schema, migration, cluster, CLI, API, JSON, YAML, Docker."
+prompt = ""
+
+[audio]
+# Audio quieter than this RMS (signed-16-bit scale) is treated as silence and
+# never reaches whisper, which otherwise hallucinates confident text — most
+# famously "Thank you." — on a silent recording.
+#
+# The 150 default was calibrated against synthetic audio, not a real
+# microphone. `dictated` logs the measured rms on every request, so if it is
+# rejecting real speech (or accepting silence), read the log and pick a value
+# from your own numbers rather than guessing.
+silence_rms_threshold = 150.0

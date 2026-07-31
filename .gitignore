@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.wav.tmp
+.DS_Store
+
+# Agent / SDD scaffolding — local workflow, not part of the project.
+.superpowers/
+
+# Rendered launchd plists. Only the .plist.template files are tracked; a
+# rendered plist contains the invoking user's absolute paths and bind address.
+launchd/*.plist
+
+# A real config, if anyone puts one here instead of ~/.config/dictate/.
+# config.example.toml is the tracked one.
+config.toml
