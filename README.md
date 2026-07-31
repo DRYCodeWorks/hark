@@ -1,5 +1,7 @@
 # hark
 
+![hark — an audio waveform resolving into the word "hark" followed by a terminal cursor](docs/hark-social.png)
+
 Push-to-talk dictation into whatever has focus — most usefully a terminal
 session reached over SSH or mosh, but really anywhere: Slack, a browser, any
 text field. Hold **Ctrl+Alt+Space**, speak, release; the transcript lands on
