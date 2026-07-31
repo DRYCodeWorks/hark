@@ -104,8 +104,13 @@ re-renders and reloads.
 The plists are **rendered from templates** in `launchd/`, never edited by
 hand, because launchd reads its own XML and cannot see `config.py` — so the
 two drift silently. `tests/test_launchd_config_sync.py` renders the templates
-and asserts they agree with config, including that `hark` is never bound to
-`0.0.0.0` and that the ASR server is never bound off loopback.
+and asserts they agree with config, including that the ASR server is never
+bound off loopback.
+
+A wildcard bind is refused by `hark.plists` itself, not only by the test
+suite — `install-server.sh` stops rather than installing a plist that listens
+on every interface. Any other address is accepted, since the two-machine setup
+binds to a private one on purpose.
 
 The shared secret lives at `~/.config/hark/key` (mode 600), outside the repo.
 
@@ -174,10 +179,10 @@ Each `FAIL` line names its exact fix.
 `--doctor` does **not** check Accessibility. Only a real hotkey press confirms
 that one.
 
-## Two permissions setup.sh cannot grant for you
+## Two permissions the installer cannot grant for you
 
 Both need a human click in System Settings — macOS doesn't allow a script to
-flip either — but they work fundamentally differently, and `setup.sh` handles
+flip either — but they work fundamentally differently, and `install-client.sh` handles
 them differently on purpose. These two cost a full debugging session to
 understand, so they are worth reading before you hit them.
 
@@ -185,7 +190,7 @@ understand, so they are worth reading before you hit them.
    ⌘V paste. Without it, `hs.hotkey.bind` silently never fires: no error, no
    console message, nothing. This one **is** pre-grantable — the Accessibility
    pane has a "+" button and lists every installed app whether or not it has
-   ever run — so `setup.sh` opens the pane and blocks until you confirm.
+   ever run — so `install-client.sh` opens the pane and blocks until you confirm.
 
 2. **Microphone** — `rec` runs as Hammerspoon's *child process*, so macOS
    attributes microphone access to **Hammerspoon**, not to `rec`. This one is
@@ -222,7 +227,7 @@ bind = "10.x.x.x"     # never 0.0.0.0
 ```
 
 On the recording machine, point `server` in
-`~/.hammerspoon/hark-config.lua` at the same address. `setup.sh` will offer
+`~/.hammerspoon/hark-config.lua` at the same address. `install-client.sh` will offer
 to fetch the key over SSH.
 
 `whisper.host` stays loopback in both cases and is not configurable. It is the
