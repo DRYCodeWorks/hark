@@ -15,3 +15,6 @@ launchd/*.plist
 # A real config, if anyone puts one here instead of ~/.config/hark/.
 # config.example.toml is the tracked one.
 config.toml
+
+# Local migration notes, not part of the project.
+LAPTOP-MIGRATION.local.md
