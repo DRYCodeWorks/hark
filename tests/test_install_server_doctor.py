@@ -121,6 +121,59 @@ class TestVerifyModel:
         assert re.search(r'"[0-9a-f]{40}"', line), f"not a full commit sha: {line}"
 
 
+def run_check_server_installed(venv_dir: Path) -> tuple[int, str]:
+    """Run check_server_installed against a fabricated install prefix."""
+    program = f"""
+    source {SCRIPT}
+    VENV_DIR="{venv_dir}"
+    VENV_PYTHON="$VENV_DIR/bin/python"
+    check_server_installed
+    """
+    result = subprocess.run(
+        ["bash", "-c", program],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(Path.home())},
+    )
+    return result.returncode, _ANSI.sub("", result.stdout + result.stderr)
+
+
+class TestServerInstalled:
+    """The plists name an absolute path inside the install prefix, and launchd
+    reports a bad one only as a restart loop plus a spawn error in a log file
+    nobody is watching. This check is the thing that says so out loud, so it
+    must not PASS on an install that cannot actually run.
+    """
+
+    def _venv(self, tmp_path: Path, *, importable: bool) -> Path:
+        venv = tmp_path / "venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "uvicorn").write_text("#!/bin/sh\n")
+        (venv / "bin" / "uvicorn").chmod(0o755)
+        python = venv / "bin" / "python"
+        python.write_text("#!/bin/sh\nexit %d\n" % (0 if importable else 1))
+        python.chmod(0o755)
+        return venv
+
+    def test_a_working_install_passes(self, tmp_path):
+        status, out = run_check_server_installed(self._venv(tmp_path, importable=True))
+        assert status == 0, out
+        assert "FAIL" not in out
+
+    def test_a_missing_install_fails(self, tmp_path):
+        status, out = run_check_server_installed(tmp_path / "not-installed")
+        assert status != 0
+        assert "FAIL" in out
+        assert "install-server.sh" in out
+
+    def test_a_venv_that_cannot_import_hark_is_not_a_pass(self, tmp_path):
+        # The trap this exists for: uvicorn is on disk, so an existence check
+        # alone would PASS, while launchd cannot start the app at all.
+        status, out = run_check_server_installed(self._venv(tmp_path, importable=False))
+        assert status != 0, out
+        assert "cannot import hark" in out
+
+
 def test_sourcing_the_script_installs_nothing():
     # The source guard is what makes every other test here safe to run.
     result = subprocess.run(

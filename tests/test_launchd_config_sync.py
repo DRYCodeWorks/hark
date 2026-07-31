@@ -140,7 +140,36 @@ class TestDictatedPlist:
         monkeypatch.setattr(config, "HARK_HOST", host)
         assert arg_after(render_plist(DICTATED_PLIST)["ProgramArguments"], "--host") == host
 
-    def test_workdir_is_the_repo_root(self):
-        # A wrong WorkingDirectory makes `uv run` resolve a different project
-        # (or none), which launchd surfaces only as a nonzero exit in the log.
-        assert Path(self.plist["WorkingDirectory"], "pyproject.toml").is_file()
+    # The clone must not be load-bearing for the running service. These three
+    # replace an earlier test that asserted the opposite — that WorkingDirectory
+    # WAS the repo root — which made moving the checkout break the service and
+    # `git pull` live-patch a running daemon (issue #3). The intent changed;
+    # this is not a bug fix on top of the old assertion.
+
+    def test_runs_the_installed_venv_not_the_clone(self):
+        program = Path(self.args[0])
+        assert program == plists.VENV_DIR / "bin" / "uvicorn", (
+            f"launchd would run {program}, not the installed server"
+        )
+
+    def test_nothing_in_the_plist_points_into_the_clone(self):
+        repo = str(plists.REPO_ROOT)
+        offenders = [v for v in self.args if isinstance(v, str) and v.startswith(repo)]
+        assert not offenders, (
+            f"these reach into the checkout, so moving it breaks the service: {offenders}"
+        )
+
+    def test_rendering_without_templates_explains_itself(self, monkeypatch, capsys, tmp_path):
+        # Reachable by running the INSTALLED copy instead of the checkout: the
+        # templates are not in the wheel. It cost a failed install to find, and
+        # a FileNotFoundError naming a path inside site-packages/ says nothing
+        # about what to do next.
+        monkeypatch.setattr(plists, "TEMPLATE_DIR", tmp_path / "gone")
+        assert plists.main([]) == 1
+        err = capsys.readouterr().err
+        assert "from a checkout" in err, err
+
+    def test_sets_no_working_directory(self):
+        # Absence is the assertion: nothing here resolves a relative path, and
+        # a WorkingDirectory is what tied the daemon to the checkout before.
+        assert "WorkingDirectory" not in self.plist

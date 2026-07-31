@@ -8,11 +8,13 @@
 #
 #   1. installs whisper-cpp and uv via Homebrew if missing
 #   2. downloads a Whisper model (skipped if one is already there)
-#   3. generates the shared secret at ~/.config/hark/key (mode 600) so
+#   3. installs the hark package into ~/.local/share/hark/venv, which is what
+#      launchd actually runs — the clone is for editing, not for serving
+#   4. generates the shared secret at ~/.config/hark/key (mode 600) so
 #      install-client.sh has something to read
-#   4. renders both launchd plists from ~/.config/hark/config.toml
-#   5. boots the services out and back in
-#   6. waits for /health and refuses to claim success if it never answers
+#   5. renders both launchd plists from ~/.config/hark/config.toml
+#   6. boots the services out and back in
+#   7. waits for /health and refuses to claim success if it never answers
 #
 # `./install-server.sh --doctor` runs the checks alone, read-only, changing
 # nothing.
@@ -27,6 +29,14 @@ CONFIG_DIR="$HOME/.config/hark"
 KEY_FILE="$CONFIG_DIR/key"
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 LABELS=(com.drycodeworks.hark com.drycodeworks.hark-whisper)
+
+# Where the running service lives, kept in step with hark.plists.VENV_DIR —
+# tests/test_launchd_config_sync.py asserts the plists point here. The clone is
+# a place to edit code; a daemon that runs out of it breaks when the checkout
+# moves and silently changes behaviour on `git pull`.
+INSTALL_DIR="$HOME/.local/share/hark"
+VENV_DIR="$INSTALL_DIR/venv"
+VENV_PYTHON="$VENV_DIR/bin/python"
 
 MODEL_DIR="$HOME/.local/share/whisper-cpp"
 MODEL_NAME="ggml-large-v3-turbo.bin"
@@ -65,14 +75,36 @@ doctor_fail() {
 # re-parsing the TOML here. config.py is the single source of truth for what
 # the plists were rendered with, so asking it is the only way to be sure the
 # health check probes the address the service actually bound.
+#
+# Asked of the INSTALLED package, not the clone: the installed one is what
+# launchd is running, and if the two have drifted then the clone's answer is
+# the wrong one to probe with.
 hark_url() {
-  (cd "$REPO_DIR" && uv run --quiet python -c \
-    'from hark import config; print(f"http://{config.HARK_HOST}:{config.HARK_PORT}")')
+  "$VENV_PYTHON" -c \
+    'from hark import config; print(f"http://{config.HARK_HOST}:{config.HARK_PORT}")'
 }
 
 # ==============================================================================
 # Checks
 # ==============================================================================
+
+# The plists name an absolute path inside VENV_DIR. If that venv is missing or
+# broken, launchd's only account of it is a restart loop and a spawn error in
+# /tmp/hark.err — so check it here, first, where the message can say what to do.
+check_server_installed() {
+  if [[ ! -x "$VENV_DIR/bin/uvicorn" ]]; then
+    doctor_fail "the server is installed at ${VENV_DIR}" \
+      "re-run ./install-server.sh (it installs the package there; launchd runs that copy, not this clone)"
+    return 1
+  fi
+  if ! "$VENV_PYTHON" -c 'import hark' >/dev/null 2>&1; then
+    doctor_fail "the server is installed at ${VENV_DIR}" \
+      "the venv exists but cannot import hark — re-run ./install-server.sh"
+    return 1
+  fi
+  doctor_pass "the server is installed at ${VENV_DIR}"
+  return 0
+}
 
 check_model() {
   local path="$MODEL_DIR/$MODEL_NAME" size
@@ -175,6 +207,7 @@ verify_model() {
 run_doctor() {
   log "hark --doctor: read-only checks, nothing is modified."
   DOCTOR_FAILURES=0
+  check_server_installed || true
   check_model      || true
   check_key        || true
   check_services_loaded || true
@@ -249,7 +282,27 @@ else
   log "Model saved to ${MODEL_PATH}"
 fi
 
-# --- 3. Shared secret ---------------------------------------------------------
+# --- 3. Install the server -----------------------------------------------------
+
+# launchd runs THIS copy, not the clone. Rebuilt from scratch on every run so a
+# dependency dropped from pyproject.toml actually leaves, rather than lingering
+# in the installed environment and hiding a missing declaration until someone
+# installs fresh. It is a few seconds and a 26 MB directory.
+log "Installing the server into ${VENV_DIR}..."
+mkdir -p "$INSTALL_DIR"
+rm -rf "$VENV_DIR"
+uv venv --quiet "$VENV_DIR"
+uv pip install --quiet --python "$VENV_PYTHON" "$REPO_DIR"
+
+# Prove it before a plist points launchd at it: a venv that cannot import hark
+# would otherwise surface as a restart loop with a traceback in /tmp/hark.err.
+if ! "$VENV_PYTHON" -c 'import hark' >/dev/null 2>&1; then
+  err "installed ${VENV_DIR} but it cannot import hark — aborting."
+  exit 1
+fi
+log "Installed. The clone is now only needed to re-install."
+
+# --- 4. Shared secret ---------------------------------------------------------
 
 mkdir -p "$CONFIG_DIR"
 chmod 700 "$CONFIG_DIR"
@@ -260,18 +313,22 @@ else
   # implementation of how the key is created and persisted. Regenerating a
   # key that already exists would silently 401 every configured client.
   log "Generating the shared secret..."
-  (cd "$REPO_DIR" && uv run --quiet python -c \
-    'from hark import config; config.hark_key()')
+  # Run from the INSTALLED package: the key the server will read must be
+  # written by the same code that will read it.
+  "$VENV_PYTHON" -c 'from hark import config; config.hark_key()'
   log "Wrote ${KEY_FILE}"
 fi
 
-# --- 4. Render the plists -----------------------------------------------------
+# --- 5. Render the plists -----------------------------------------------------
 
 log "Rendering launchd plists from config..."
 mkdir -p "$LAUNCH_AGENTS"
+# From the CLONE, not the installed venv: the templates live in launchd/ and
+# are not shipped in the wheel. Rendering is an install-time task, and this
+# script is part of the checkout that has them.
 (cd "$REPO_DIR" && uv run --quiet python -m hark.plists >/dev/null)
 
-# --- 5. Load the services -----------------------------------------------------
+# --- 6. Load the services -----------------------------------------------------
 
 for label in "${LABELS[@]}"; do
   plist="$LAUNCH_AGENTS/${label}.plist"
@@ -312,7 +369,7 @@ for label in "${LABELS[@]}"; do
   log "Loaded ${label}"
 done
 
-# --- 6. Verify ----------------------------------------------------------------
+# --- 7. Verify ----------------------------------------------------------------
 
 URL="$(hark_url)/health"
 log "Waiting for ${URL}..."

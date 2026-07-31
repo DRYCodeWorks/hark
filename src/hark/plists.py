@@ -21,9 +21,24 @@ from xml.sax.saxutils import escape
 
 from hark import config
 
+# Rendering is an INSTALL-time task, run from a checkout: the templates live in
+# the repo and are not shipped in the wheel, so these resolve only when this
+# module is imported from the source tree. Running `python -m hark.plists` out
+# of the installed venv is a mistake with a specific message - see main().
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 TEMPLATE_DIR = REPO_ROOT / "launchd"
 LAUNCH_AGENTS = Path.home() / "Library/LaunchAgents"
+
+# Where install-server.sh installs the package for the running service.
+#
+# The clone is a place you edit code, not a place a daemon lives. Pointing
+# launchd at the checkout made moving or deleting it break the service - with
+# KeepAlive true, that shows up only as a restart loop and a nonzero exit in
+# /tmp/hark.err - and made `git pull` live-patch a running daemon, so the next
+# utterance ran whatever had just landed. Installing into a stable prefix makes
+# the clone disposable and upgrades explicit: re-run install-server.sh.
+INSTALL_DIR = Path.home() / ".local/share/hark"
+VENV_DIR = INSTALL_DIR / "venv"
 
 TEMPLATES = (
     "com.drycodeworks.hark.plist",
@@ -77,9 +92,10 @@ def _check_bind(host: str) -> str:
 def substitutions() -> dict[str, str]:
     """The placeholder → value map, derived entirely from config."""
     return {
-        "@UV@": _tool("uv", "/opt/homebrew/bin/uv"),
+        # The installed venv's uvicorn, by absolute path - not `uv run` from
+        # the clone. uv is needed to install the service, not to run it.
+        "@UVICORN@": str(VENV_DIR / "bin" / "uvicorn"),
         "@WHISPER_SERVER@": _tool("whisper-server", "/opt/homebrew/bin/whisper-server"),
-        "@WORKDIR@": str(REPO_ROOT),
         "@BIND@": _check_bind(config.HARK_HOST),
         "@PORT@": str(config.HARK_PORT),
         "@WHISPER_HOST@": config.WHISPER_HOST,
@@ -112,6 +128,19 @@ def main(argv: list[str] | None = None) -> int:
         help="write the rendered plists to stdout instead of installing them",
     )
     args = parser.parse_args(argv)
+
+    # Same reasoning as the bind check below: this is reachable by running the
+    # installed copy instead of the checkout, and a FileNotFoundError naming a
+    # path inside site-packages/ does not tell anyone what to do about it.
+    if not TEMPLATE_DIR.is_dir():
+        print(
+            f"error: no plist templates at {TEMPLATE_DIR}.\n"
+            "The templates live in the repo and are not shipped in the wheel, "
+            "so rendering has to run from a checkout:\n"
+            "  cd /path/to/hark && uv run python -m hark.plists",
+            file=sys.stderr,
+        )
+        return 1
 
     # A misconfigured bind is a user error in a TOML file, not a bug — it
     # deserves the message, not a traceback. install-server.sh calls this, so
