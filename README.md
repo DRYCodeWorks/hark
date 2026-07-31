@@ -1,5 +1,7 @@
 # hark
 
+[![CI](https://github.com/DRYCodeWorks/hark/actions/workflows/ci.yml/badge.svg)](https://github.com/DRYCodeWorks/hark/actions/workflows/ci.yml)
+
 ![hark — an audio waveform resolving into the word "hark" followed by a terminal cursor](docs/hark-social.png)
 
 Push-to-talk dictation into whatever has focus — most usefully a terminal
@@ -287,9 +289,11 @@ exit.
 
 ## What's been tested, and what hasn't
 
-One person, one pair of Macs, one microphone. The server side has a 61-test
-suite; the client side is exercised by real use, not by CI. Specifically worth
-knowing:
+One person, one pair of Macs, one microphone. CI runs the server suite (67
+pytest), the client suite (8 Lua tests against a stubbed Hammerspoon) and
+shellcheck, on both Linux and macOS. What CI cannot reach is everything the
+permissions model touches — a real microphone, a real TCC grant, a real paste
+into a real window. Specifically worth knowing:
 
 **The silence threshold is calibrated against synthetic audio, not a real
 microphone.** `SILENCE_RMS_THRESHOLD = 150.0` sits ~16× above the noise floor
@@ -368,8 +372,17 @@ client/
 config.example.toml        shape of ~/.config/hark/config.toml
 src/hark/                  the HTTP service
 launchd/                   plist templates, rendered by hark.plists
-tests/                     pytest suite (61 tests)
+tests/                     pytest suite (67) + test_client_record.lua (8)
+.github/workflows/ci.yml   both suites + shellcheck, on Linux and macOS
 docs/                      design spec + implementation plan
+```
+
+Run the suites locally the way CI does:
+
+```bash
+uv run --locked pytest -q
+lua tests/test_client_record.lua
+shellcheck install-server.sh install-client.sh
 ```
 
 ## License
