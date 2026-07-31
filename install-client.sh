@@ -188,6 +188,10 @@ check_recorder() {
 # would test the terminal's own microphone grant, a different permission
 # that would produce a confidently wrong PASS. Never run rec from here to
 # "test" this; read the file init.lua already wrote.
+#
+# That is still true now that rec asks TCC directly instead of inferring the
+# answer from a frame count: authorizationStatus resolves against the
+# responsible process too. Run from a terminal it reports on the terminal.
 check_mic_permission() {
   local status_file="$CONFIG_DIR/.hark-mic-status"
   if [[ ! -f "$status_file" ]]; then
@@ -206,6 +210,16 @@ check_mic_permission() {
     denied)
       doctor_fail "Hammerspoon can reach the microphone" \
         "System Settings -> Privacy & Security -> Microphone -> turn ON Hammerspoon (it will be listed now — it has finally asked)"
+      return 1
+      ;;
+    error)
+      # The probe failed for a reason that is not permission — a muted device,
+      # a dead input, rec missing. Sending the user to the Microphone toggle
+      # would be a wrong answer, so report what actually happened instead.
+      local detail
+      detail="$(sed -n '3p' "$status_file" 2>/dev/null || true)"
+      doctor_fail "Hammerspoon can reach the microphone" \
+        "the probe failed, but not on permission: ${detail:-see $status_file}"
       return 1
       ;;
     *)

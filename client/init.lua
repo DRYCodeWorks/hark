@@ -261,6 +261,11 @@ end
 -- Send the recorded WAV
 -- ============================================================================
 
+-- rec's last one-line reason for exiting non-zero, so the alert the user
+-- actually sees can name the cause instead of pointing at the log. Cleared on
+-- every successful capture; see launchRecorder.
+local lastRecorderFailure = nil
+
 local function sendRecording()
   if not HARK_KEY or HARK_KEY == "" then
     beep()
@@ -271,10 +276,15 @@ local function sendRecording()
   local f = io.open(WAV_PATH, "rb")
   if not f then
     beep()
+    -- rec deletes the file rather than leave an unusable one, and exits with a
+    -- single explanatory line. Show that line: it distinguishes a denied
+    -- microphone from a muted one from a dead device, and sending the user to
+    -- the log to find out is how a permission failure gets read as a
+    -- transcription failure.
     hs.alert.show(
-      "hark: " .. WAV_PATH .. " was never written. Check "
-        .. LOG_PATH .. " — rec logs a reason there whenever it exits non-zero.",
-      6
+      "hark: nothing was recorded.\n"
+        .. (lastRecorderFailure or ("See " .. LOG_PATH .. " for the reason.")),
+      8
     )
     return
   end
@@ -283,11 +293,12 @@ local function sendRecording()
 
   if not audio or #audio == 0 then
     beep()
+    -- Not a permission problem: rec settles that with TCC before it opens the
+    -- device, and deletes the file rather than leave an empty one. A zero-byte
+    -- file here means rec died before finalizing the WAV header.
     hs.alert.show(
-      "hark: recorded a zero-byte file.\n"
-        .. "Check System Settings -> Privacy & Security -> Microphone -> "
-        .. "Hammerspoon is ON. rec runs as Hammerspoon's CHILD process, so "
-        .. "macOS attributes microphone access to Hammerspoon, not to rec.",
+      "hark: recorded a zero-byte file - rec exited before finalizing the WAV.\n"
+        .. (lastRecorderFailure or ("See " .. LOG_PATH .. " for the reason.")),
       8
     )
     return
@@ -317,8 +328,15 @@ local function launchRecorder(recorderPath)
     -- exiting - is also the moment the WAV header is final and the file is
     -- safe to read. A stronger guarantee than any fixed sleep would be.
     recorderTask = nil
+    lastRecorderFailure = nil
     if exitCode ~= 0 then
       logLine("rec exited " .. tostring(exitCode) .. ": " .. tostring(stdErr))
+      -- rec's stderr is one line, already phrased for a human, and prefixed
+      -- "rec: " - strip the prefix and hand the rest to sendRecording.
+      local reason = tostring(stdErr):gsub("%s+$", ""):gsub("^rec: ", "")
+      if reason ~= "" then
+        lastRecorderFailure = reason
+      end
     end
     hideRecordingIndicator()
     -- Sent immediately, with no settling delay. rec releases the AVAudioFile
@@ -451,18 +469,26 @@ local function probeMicrophone()
 
   os.remove(MIC_PROBE_PATH) -- never inspect a stale probe from an earlier run
 
-  local function finish(ok, detail)
+  -- status is "ok", "denied", or "error". The third exists because not every
+  -- way the probe can fail is a permission problem, and saying "denied" for a
+  -- muted device would send the user to a Microphone toggle that is already on.
+  local function finish(status, detail)
     os.remove(MIC_PROBE_PATH)
 
     local statusFile = io.open(MIC_STATUS_PATH, "w")
     if statusFile then
-      statusFile:write((ok and "ok" or "denied") .. "\n" .. os.date("%Y-%m-%d %H:%M:%S") .. "\n")
+      statusFile:write(status .. "\n" .. os.date("%Y-%m-%d %H:%M:%S") .. "\n")
+      -- One line, always third: --doctor reads it positionally, and rec's
+      -- stderr can carry newlines.
+      if detail then
+        statusFile:write((detail:gsub("%s+", " ")) .. "\n")
+      end
       statusFile:close()
     else
       print("hark: could not write " .. MIC_STATUS_PATH .. " - setup.sh --doctor's mic check will report it as missing.")
     end
 
-    if ok then
+    if status == "ok" then
       -- Silent on success - do not nag on every config reload.
       return
     end
@@ -470,33 +496,45 @@ local function probeMicrophone()
     if detail then
       print("hark: microphone probe failed - " .. detail)
     end
-    hs.alert.show(
-      "hark: Hammerspoon needs Microphone permission.\n"
-        .. "A consent dialog should have appeared just now - click Allow, then\n"
-        .. "reload this config (or just try the hotkey again).\n"
-        .. "If you missed the dialog or it never appeared: System Settings -> "
-        .. "Privacy & Security -> Microphone -> turn ON Hammerspoon.",
-      20
-    )
+
+    if status == "denied" then
+      hs.alert.show(
+        "hark: Hammerspoon needs Microphone permission.\n"
+          .. "A consent dialog should have appeared just now - click Allow, then\n"
+          .. "reload this config (or just try the hotkey again).\n"
+          .. "If you missed the dialog or it never appeared: System Settings -> "
+          .. "Privacy & Security -> Microphone -> turn ON Hammerspoon.",
+        20
+      )
+    else
+      hs.alert.show(
+        "hark: the microphone probe failed, but not on permission.\n"
+          .. (detail or "no detail") .. "\n"
+          .. "Run ./install-client.sh --doctor for the full picture.",
+        20
+      )
+    end
   end
 
-  -- rec exits 0 only after actually writing audio frames, and exits 3 with a
-  -- permission message when it captured none - so its exit code alone answers
-  -- the question, without needing to stat the file.
+  -- rec asks TCC before it opens the device and reserves exit 3 for the
+  -- answer, so the permission question is settled by that one code. It used to
+  -- be inferred from an empty capture, which could not work: an ungranted
+  -- process still receives buffers, full length and all zeros, so rec exited 0
+  -- and this wrote "ok" for a microphone it could not actually hear (issue #9).
   local probeTask = hs.task.new(recorderPath, function(exitCode, _, stdErr)
     if exitCode == 0 then
-      finish(true)
+      finish("ok")
       return
     end
     local reason = "rec exited " .. tostring(exitCode) .. "."
     if stdErr and stdErr ~= "" then
       reason = reason .. " stderr: " .. stdErr
     end
-    finish(false, reason)
+    finish(exitCode == 3 and "denied" or "error", reason)
   end, { MIC_PROBE_PATH, "0.4" })
 
   if not probeTask:start() then
-    finish(false, "rec failed to start (" .. recorderPath .. ").")
+    finish("error", "rec failed to start (" .. recorderPath .. ").")
   end
 end
 
