@@ -93,9 +93,14 @@ check_key() {
 }
 
 check_services_loaded() {
-  local ok=0 label
+  local ok=0 label listing
+  # Captured once rather than piped per-label on purpose: `launchctl list |
+  # grep -q` makes grep exit at the first match, launchctl takes SIGPIPE, and
+  # `set -o pipefail` reports the whole pipeline as failed — so every service
+  # reads as "not loaded" no matter what is actually running.
+  listing="$(launchctl list)"
   for label in "${LABELS[@]}"; do
-    if launchctl list | grep -q "$label"; then
+    if grep -q "$label" <<<"$listing"; then
       doctor_pass "${label} is loaded"
     else
       doctor_fail "${label} is loaded" "re-run ./install-server.sh"
