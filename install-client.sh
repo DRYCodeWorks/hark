@@ -268,19 +268,27 @@ check_key_auth() {
   tmp_dir="$(mktemp -d)"
   tmp_wav="$tmp_dir/probe.wav"
 
-  # Half a second of silence, written with the stdlib rather than by recording
-  # anything: this check is about whether the KEY is accepted, and opening the
-  # microphone here would both prompt for a permission this script does not
-  # need and test the terminal's TCC grant instead of Hammerspoon's. The
-  # server answers 200-with-empty-transcript for silence, which is a pass —
-  # only a 401 fails this check.
-  if ! python3 -c '
-import sys, wave
-with wave.open(sys.argv[1], "wb") as w:
-    w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
-    w.writeframes(b"\x00\x00" * 8000)
-' "$tmp_wav" >/dev/null 2>&1; then
-    doctor_fail "key authenticates against /dictate" "could not write a test WAV with python3"
+  # Half a second of silence, rather than recording anything: this check is
+  # about whether the KEY is accepted, and opening the microphone here would
+  # both prompt for a permission this script does not need and test the
+  # terminal's TCC grant instead of Hammerspoon's. The server answers
+  # 200-with-empty-transcript for silence, which is a pass — only a 401 fails.
+  #
+  # Written with printf and dd rather than a python3 one-liner. That one-liner
+  # quietly made Python a requirement on the CLIENT Mac, which otherwise needs
+  # only Homebrew, Hammerspoon and swiftc — and when it was missing, the check
+  # failed in a way that read like a hark problem rather than a missing
+  # interpreter.
+  #
+  # A 16 kHz mono 16-bit WAV of silence is a fixed 44-byte header followed by
+  # zeros. Header fields below are little-endian: RIFF chunk size 16036
+  # (36 + data), fmt chunk 16, PCM format 1, 1 channel, 16000 Hz, byte rate
+  # 32000, block align 2, 16 bits per sample, data size 16000.
+  if ! {
+    printf 'RIFF\244\076\000\000WAVEfmt \020\000\000\000\001\000\001\000\200\076\000\000\000\175\000\000\002\000\020\000data\200\076\000\000' &&
+      dd if=/dev/zero bs=16000 count=1 2>/dev/null
+  } >"$tmp_wav"; then
+    doctor_fail "key authenticates against /dictate" "could not write the test WAV to ${tmp_dir}"
     rm -rf "$tmp_dir"
     return 1
   fi
