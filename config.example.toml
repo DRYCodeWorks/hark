@@ -13,8 +13,10 @@
 # address, or a LAN address you trust. The client then POSTs to that address.
 #
 # Never set this to 0.0.0.0. It would expose an endpoint that chooses the text
-# typed into your terminal to every network you are attached to. The plist
-# drift guard fails the test suite if you try.
+# typed into your terminal to every network you are attached to. Rendering the
+# plists refuses outright on 0.0.0.0, :: or an empty value, so install-server.sh
+# stops rather than installing it. Any other address is accepted — the
+# two-machine setup is a supported configuration.
 bind = "127.0.0.1"
 port = 8911
 

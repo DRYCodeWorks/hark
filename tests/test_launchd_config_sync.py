@@ -122,13 +122,23 @@ class TestDictatedPlist:
         assert plist_host != "0.0.0.0"
         assert plist_host != ""
 
-    def test_wildcard_bind_from_user_config_reaches_the_plist(self, monkeypatch):
-        # The assertion above is only worth having if the dangerous value can
-        # actually reach the plist — which is newly possible now that the bind
-        # address comes from a user-editable file rather than from source.
-        monkeypatch.setattr(config, "HARK_HOST", "0.0.0.0")
-        args = render_plist(DICTATED_PLIST)["ProgramArguments"]
-        assert arg_after(args, "--host") == "0.0.0.0"
+    @pytest.mark.parametrize("host", ["0.0.0.0", "::", "", "  "])
+    def test_wildcard_bind_is_refused_at_render(self, monkeypatch, host):
+        # This used to assert the opposite — that the dangerous value reached
+        # the plist — because the guard was test-only and install-server.sh
+        # never ran pytest. It is enforced in render() now, so the same
+        # scenario must raise instead of producing a plist.
+        monkeypatch.setattr(config, "HARK_HOST", host)
+        with pytest.raises(plists.UnsafeBindError):
+            plists.render(DICTATED_PLIST)
+
+    @pytest.mark.parametrize("host", ["127.0.0.1", "10.0.0.2", "192.168.1.9", "100.64.0.1"])
+    def test_private_binds_are_still_allowed(self, monkeypatch, host):
+        # The guard must refuse wildcards ONLY. The two-machine setup binds to
+        # a private address on purpose, so a whitelist of loopback would break
+        # a supported configuration.
+        monkeypatch.setattr(config, "HARK_HOST", host)
+        assert arg_after(render_plist(DICTATED_PLIST)["ProgramArguments"], "--host") == host
 
     def test_workdir_is_the_repo_root(self):
         # A wrong WorkingDirectory makes `uv run` resolve a different project

@@ -41,13 +41,46 @@ def _tool(name: str, fallback: str) -> str:
     return shutil.which(name) or fallback
 
 
+class UnsafeBindError(ValueError):
+    """Raised when the configured bind address would expose the service."""
+
+
+# 0.0.0.0 and :: are every interface; "" is how most socket APIs spell the
+# same thing. Everything else is allowed on purpose — the two-machine setup
+# binds to a private address, so this cannot be a whitelist of loopback.
+WILDCARD_BINDS = frozenset({"0.0.0.0", "::", ""})
+
+
+def _check_bind(host: str) -> str:
+    """Refuse a wildcard bind before it can reach a plist.
+
+    `hark` returns text that goes onto the clipboard and is then pasted into
+    whatever has focus, so an endpoint reachable from every attached network
+    lets anyone who can route to this machine choose what gets typed into the
+    user's terminal. The drift guard in the test suite asserted this, but
+    `install-server.sh` renders and bootstraps without ever running pytest —
+    so for an actual user the check did not exist. Enforcing it here is what
+    makes the promise in README.md and config.example.toml true.
+    """
+    if host.strip() in WILDCARD_BINDS:
+        raise UnsafeBindError(
+            f"server.bind is {host!r}, which listens on every network interface.\n"
+            "hark's response is pasted into whatever has focus, so this lets "
+            "anyone who can reach this machine choose what gets typed.\n"
+            "Use 127.0.0.1 for a single machine, or the private address of "
+            "this machine (a tailnet/VPN/LAN IP) for the two-machine setup.\n"
+            "Set it in ~/.config/hark/config.toml."
+        )
+    return host
+
+
 def substitutions() -> dict[str, str]:
     """The placeholder → value map, derived entirely from config."""
     return {
         "@UV@": _tool("uv", "/opt/homebrew/bin/uv"),
         "@WHISPER_SERVER@": _tool("whisper-server", "/opt/homebrew/bin/whisper-server"),
         "@WORKDIR@": str(REPO_ROOT),
-        "@BIND@": config.HARK_HOST,
+        "@BIND@": _check_bind(config.HARK_HOST),
         "@PORT@": str(config.HARK_PORT),
         "@WHISPER_HOST@": config.WHISPER_HOST,
         "@WHISPER_PORT@": str(config.WHISPER_PORT),
@@ -80,16 +113,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    # A misconfigured bind is a user error in a TOML file, not a bug — it
+    # deserves the message, not a traceback. install-server.sh calls this, so
+    # this is what the user sees mid-install.
+    try:
+        rendered = {name: render(name) for name in TEMPLATES}
+    except UnsafeBindError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
     if args.print_only:
-        for name in TEMPLATES:
+        for name, text in rendered.items():
             print(f"===== {name} =====")
-            print(render(name))
+            print(text)
         return 0
 
     LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
-    for name in TEMPLATES:
+    for name, text in rendered.items():
         target = LAUNCH_AGENTS / name
-        target.write_text(render(name))
+        target.write_text(text)
         print(f"wrote {target}")
 
     label_args = " ".join(f"gui/$(id -u)/{n.removesuffix('.plist')}" for n in TEMPLATES)
