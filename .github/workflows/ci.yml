@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # hark only runs on macOS, but the suite is portable and Linux is the
+    # faster signal. Both are here because the scripted checks are shell, and
+    # GNU and BSD awk/grep are exactly where a passing test stops meaning
+    # anything on the machine a user actually installs to.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned to an exact version: astral-sh/setup-uv publishes no floating
+      # major tag, so @v9 does not resolve.
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      # --locked fails if uv.lock has drifted from pyproject.toml, so a
+      # dependency change can't land without the lockfile that pins it.
+      - name: pytest
+        run: uv run --locked pytest -q
+
+      - name: Install Lua
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install lua
+          else
+            sudo apt-get update && sudo apt-get install -y lua5.4
+            sudo ln -sf "$(command -v lua5.4)" /usr/local/bin/lua
+          fi
+
+      # The client-side suite. It has never been wired into anything, so it
+      # only ran when someone remembered it existed.
+      - name: Lua client tests
+        run: lua tests/test_client_record.lua
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Preinstalled on the Ubuntu runner image.
+      - name: shellcheck
+        run: shellcheck install-server.sh install-client.sh

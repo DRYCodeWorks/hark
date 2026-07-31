@@ -92,15 +92,26 @@ check_key() {
   return 0
 }
 
+# Wrapped in a function so tests can substitute a fixture listing without a
+# real launchctl. See tests/test_install_server_doctor.py.
+service_listing() { launchctl list; }
+
 check_services_loaded() {
   local ok=0 label listing
   # Captured once rather than piped per-label on purpose: `launchctl list |
   # grep -q` makes grep exit at the first match, launchctl takes SIGPIPE, and
   # `set -o pipefail` reports the whole pipeline as failed — so every service
   # reads as "not loaded" no matter what is actually running.
-  listing="$(launchctl list)"
+  listing="$(service_listing)"
   for label in "${LABELS[@]}"; do
-    if grep -q "$label" <<<"$listing"; then
+    # Match the LABEL FIELD exactly. `com.drycodeworks.hark` is a prefix of
+    # `com.drycodeworks.hark-whisper`, so a substring grep reported the hark
+    # service as loaded whenever only the ASR service was — a confident PASS
+    # on precisely the run where the user needed to be told which of the two
+    # is down. awk compares whole fields, so it also needs no regex escaping
+    # for the dots in the label.
+    if awk -v label="$label" '$NF == label { found = 1 } END { exit !found }' \
+      <<<"$listing"; then
       doctor_pass "${label} is loaded"
     else
       doctor_fail "${label} is loaded" "re-run ./install-server.sh"
@@ -138,6 +149,13 @@ run_doctor() {
   log "All checks passed."
   return 0
 }
+
+# Sourcing this file defines the check_* functions and stops here, so the test
+# suite can exercise them without running an install. Everything below this
+# line only runs when the script is executed directly.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
 
 if [[ "${1:-}" == "--doctor" ]]; then
   run_doctor
