@@ -91,6 +91,11 @@ a model (~1.5 GB, skipped if present), generates the shared secret, renders
 both launchd plists from your config, loads them, and waits for `/health`. It
 refuses to report success if the service never answers.
 
+The model is pinned to a specific upstream revision and verified against a
+recorded SHA-256 before it is moved into place — not tracking a mutable
+`main`, and not trusting a download that merely completed. To use a different
+model, change `MODEL_REVISION` and `MODEL_SHA256` together.
+
 It is safe to re-run, and re-running is how you apply a config change — it
 re-renders and reloads.
 

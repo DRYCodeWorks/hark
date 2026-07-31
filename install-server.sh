@@ -30,10 +30,23 @@ LABELS=(com.drycodeworks.hark com.drycodeworks.hark-whisper)
 
 MODEL_DIR="$HOME/.local/share/whisper-cpp"
 MODEL_NAME="ggml-large-v3-turbo.bin"
-MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${MODEL_NAME}"
-# A truncated download is worse than a missing one: whisper-server starts,
-# fails to load the model, and the failure surfaces as an unhelpful 503 from
-# hark. Anything this far below the real size is a partial file.
+
+# Changing the model is these three lines, together. The revision is pinned
+# rather than tracking `main` because `resolve/main` is a mutable ref: what it
+# serves today and what it served last month are not guaranteed to be the same
+# bytes, and nothing downstream would notice. This is the only place hark
+# fetches something it then executes against, so it is the one trust boundary
+# that was implicit — every other one in this project is explicit.
+#
+# MODEL_SHA256 is the file's LFS oid as published by the Hugging Face API,
+# confirmed against a downloaded copy.
+MODEL_REVISION="5359861c739e955e79d9a303bcbc70fb988958b1"
+MODEL_SHA256="1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69"
+MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/${MODEL_REVISION}/${MODEL_NAME}"
+
+# Kept as a cheap pre-check before the expensive one. A truncated download is
+# worse than a missing one: whisper-server starts, fails to load the model, and
+# the failure surfaces as an unhelpful 503 from hark.
 MODEL_MIN_BYTES=$((500 * 1024 * 1024))
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -134,6 +147,31 @@ check_health() {
   return 1
 }
 
+# Verifies an existing or freshly-downloaded model against MODEL_SHA256.
+# Deliberately not silent about being skipped: a checksum you can't compute is
+# not a checksum you passed, and saying so is the difference between a
+# verified install and one that only looks like it.
+verify_model() {
+  local path="$1" actual
+  if ! command -v shasum >/dev/null 2>&1; then
+    warn "shasum not found — cannot verify the model checksum."
+    return 0
+  fi
+  log "Verifying the model checksum (1.5 GB, a few seconds)..."
+  actual="$(shasum -a 256 "$path" | awk '{print $1}')"
+  if [[ "$actual" != "$MODEL_SHA256" ]]; then
+    err "model checksum mismatch for ${path}"
+    err "  expected ${MODEL_SHA256}"
+    err "  got      ${actual}"
+    err "Delete it and re-run, or update MODEL_REVISION/MODEL_SHA256 together"
+    err "if you meant to change the model."
+    return 1
+  fi
+  log "Checksum OK."
+  return 0
+}
+
+
 run_doctor() {
   log "hark --doctor: read-only checks, nothing is modified."
   DOCTOR_FAILURES=0
@@ -191,14 +229,22 @@ done
 
 mkdir -p "$MODEL_DIR"
 MODEL_PATH="$MODEL_DIR/$MODEL_NAME"
-if [[ -f "$MODEL_PATH" ]] && (( $(stat -f '%z' "$MODEL_PATH") >= MODEL_MIN_BYTES )); then
-  log "Model already present ($MODEL_PATH)."
+
+if [[ -f "$MODEL_PATH" ]] && (( $(stat -f '%z' "$MODEL_PATH") >= MODEL_MIN_BYTES )) \
+  && verify_model "$MODEL_PATH"; then
+  log "Model already present and verified ($MODEL_PATH)."
 else
-  [[ -f "$MODEL_PATH" ]] && warn "existing model looks truncated; re-downloading."
+  [[ -f "$MODEL_PATH" ]] && warn "existing model is missing, truncated or fails its checksum; re-downloading."
   log "Downloading ${MODEL_NAME} (~1.5 GB)..."
-  # Download to a temp name and move into place only on success, so an
-  # interrupted download can never be mistaken for a usable model.
+  # Download to a temp name and verify BEFORE moving into place, so neither an
+  # interrupted transfer nor one that completed with the wrong bytes can be
+  # mistaken for a usable model.
   curl -fL --progress-bar -o "${MODEL_PATH}.part" "$MODEL_URL"
+  if ! verify_model "${MODEL_PATH}.part"; then
+    rm -f "${MODEL_PATH}.part"
+    err "Refusing to install an unverified model."
+    exit 1
+  fi
   mv "${MODEL_PATH}.part" "$MODEL_PATH"
   log "Model saved to ${MODEL_PATH}"
 fi

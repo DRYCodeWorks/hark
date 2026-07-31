@@ -10,6 +10,7 @@ installed, then substituting `service_listing` with a fixture instead of a
 real `launchctl list`.
 """
 
+import hashlib
 import re
 import subprocess
 from pathlib import Path
@@ -56,6 +57,68 @@ def run_check(fixture: str) -> tuple[int, str]:
     )
     assert not result.stderr, result.stderr
     return result.returncode, _ANSI.sub("", result.stdout)
+
+
+def run_verify_model(path: Path, expected_sha: str) -> tuple[int, str]:
+    """Run verify_model against a file, with MODEL_SHA256 overridden.
+
+    Returns (exit status, plain-text stdout+stderr).
+    """
+    program = f"""
+    source {SCRIPT}
+    MODEL_SHA256="{expected_sha}"
+    verify_model "{path}"
+    """
+    result = subprocess.run(
+        ["bash", "-c", program],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(Path.home())},
+    )
+    return result.returncode, _ANSI.sub("", result.stdout + result.stderr)
+
+
+class TestVerifyModel:
+    """The model is the one thing hark downloads and then feeds to another
+    program, so its checksum is a security control — and an untested one is
+    how the wildcard-bind guard ended up asserted only in a suite that
+    install-server.sh never ran.
+    """
+
+    def test_matching_checksum_passes(self, tmp_path):
+        f = tmp_path / "model.bin"
+        f.write_bytes(b"pretend model bytes")
+        digest = hashlib.sha256(f.read_bytes()).hexdigest()
+        status, out = run_verify_model(f, digest)
+        assert status == 0, out
+        assert "Checksum OK" in out
+
+    def test_mismatched_checksum_fails_and_names_both_digests(self, tmp_path):
+        f = tmp_path / "model.bin"
+        f.write_bytes(b"tampered")
+        wrong = "0" * 64
+        status, out = run_verify_model(f, wrong)
+        assert status != 0
+        # Both values matter: "mismatch" alone leaves you unable to tell a
+        # corrupt download from a model you deliberately changed.
+        assert wrong in out
+        assert hashlib.sha256(b"tampered").hexdigest() in out
+
+    def test_pinned_url_uses_the_revision_not_a_mutable_ref(self):
+        # Scoped to the assignment, not the whole file: the comment above it
+        # explains why `resolve/main` is wrong, and a naive substring search
+        # matches that explanation.
+        line = next(
+            ln for ln in SCRIPT.read_text().splitlines() if ln.startswith("MODEL_URL=")
+        )
+        assert "resolve/main" not in line, f"MODEL_URL tracks a mutable ref: {line}"
+        assert "${MODEL_REVISION}" in line, line
+
+    def test_the_pinned_revision_looks_like_a_commit_sha(self):
+        line = next(
+            ln for ln in SCRIPT.read_text().splitlines() if ln.startswith("MODEL_REVISION=")
+        )
+        assert re.search(r'"[0-9a-f]{40}"', line), f"not a full commit sha: {line}"
 
 
 def test_sourcing_the_script_installs_nothing():
