@@ -12,6 +12,6 @@ __pycache__/
 # rendered plist contains the invoking user's absolute paths and bind address.
 launchd/*.plist
 
-# A real config, if anyone puts one here instead of ~/.config/dictate/.
+# A real config, if anyone puts one here instead of ~/.config/hark/.
 # config.example.toml is the tracked one.
 config.toml

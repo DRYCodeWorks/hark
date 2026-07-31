@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.drycodeworks.whisper-server</string>
+  <string>com.drycodeworks.hark-whisper</string>
   <key>ProgramArguments</key>
   <array>
     <string>@WHISPER_SERVER@</string>
@@ -25,8 +25,8 @@
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/tmp/whisper-server.log</string>
+  <string>/tmp/hark-whisper.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/whisper-server.err</string>
+  <string>/tmp/hark-whisper.err</string>
 </dict>
 </plist>

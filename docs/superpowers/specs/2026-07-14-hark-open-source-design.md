@@ -1,8 +1,23 @@
 # hark — packaging `dictate` for public release
 
 **Date:** 2026-07-14
-**Status:** Design approved, pending implementation plan
+**Status:** IMPLEMENTED 2026-07-31. Kept as the rationale record, not as a plan.
 **Supersedes naming in:** `2026-07-14-dictate-design.md` (architecture unchanged)
+
+> **What actually happened, where it differs from this document.**
+>
+> The plan below assumed the tree would be scrubbed and squashed *before the
+> first push*. It wasn't — the repo was pushed with 32 commits of real history
+> on 2026-07-28, which is exactly the trap this document warned about. The
+> recovery cost more than the prevention would have: a force-push does not
+> reliably remove old objects from GitHub (they stay fetchable by SHA until an
+> uncontrolled GC), so the remote had to be **deleted and recreated** to
+> guarantee the scrub. The lesson stands, sharpened: "clean it up later" is
+> not a deferral, it is a change of method.
+>
+> Everything else shipped as designed — the rename, the config file, the
+> loopback default, the plist templates, `install-server.sh`, the optional SSH
+> key fetch, and the MIT license.
 
 ## Goal
 
@@ -16,7 +31,7 @@ anything. Every piece of product infrastructure we skip is a tax we don't pay.
 
 ### Private first, but scrubbed first
 
-The repo starts **private**, so the author can live with it for a few weeks before
+The repo starts **private**, so the author can live with it for a while before
 deciding whether it deserves to be public.
 
 **This does not defer any of the de-personalization work, and that is the whole
@@ -42,16 +57,16 @@ anyone installs it, it isn't.
 
 | was | becomes |
 |---|---|
-| `src/dictated/` | `src/hark/` |
-| `com.drycodeworks.dictated` | `com.drycodeworks.hark` |
-| `com.drycodeworks.whisper-server` | `com.drycodeworks.hark-whisper` |
-| `~/.config/dictated/key` | `~/.config/hark/key` |
-| `~/.hammerspoon/dictate-config.lua` | `~/.hammerspoon/hark-config.lua` |
-| `/tmp/dictate.wav` | `/tmp/hark.wav` |
-| `client/setup.sh` | `install-client.sh` |
+| `src/hark/` | `src/hark/` |
+| `com.drycodeworks.hark` | `com.drycodeworks.hark` |
+| `com.drycodeworks.hark-whisper` | `com.drycodeworks.hark-whisper` |
+| `~/.config/hark/key` | `~/.config/hark/key` |
+| `~/.hammerspoon/hark-config.lua` | `~/.hammerspoon/hark-config.lua` |
+| `/tmp/hark.wav` | `/tmp/hark.wav` |
+| `install-client.sh` | `install-client.sh` |
 | (none) | `install-server.sh` |
 
-`X-Dictate-Key` header becomes `X-Hark-Key`.
+`X-Hark-Key` header becomes `X-Hark-Key`.
 
 ## The key insight that makes this cheap
 
@@ -173,13 +188,13 @@ name it depends on, so the cutover must be deliberate rather than incidental:
 - The local checkout moves from `.../DRYCodeWorks/dictate` to `.../DRYCodeWorks/hark`.
   The **loaded launchd plists point at the old absolute path** and will fail the
   moment it moves.
-- The old services (`com.drycodeworks.dictated`, `com.drycodeworks.whisper-server`)
+- The old services (`com.drycodeworks.hark`, `com.drycodeworks.hark-whisper`)
   must be `bootout`'d, and the new ones (`com.drycodeworks.hark`,
   `com.drycodeworks.hark-whisper`) bootstrapped.
-- `~/.config/dictated/key` moves to `~/.config/hark/key`. **Move it, don't
+- `~/.config/hark/key` moves to `~/.config/hark/key`. **Move it, don't
   regenerate it** — a fresh key would silently 401 the client until the client
   config is also updated. Moving it keeps the existing client working.
-- The client's `~/.hammerspoon/dictate-config.lua` → `hark-config.lua`, and
+- The client's `~/.hammerspoon/hark-config.lua` → `hark-config.lua`, and
   `init.lua`'s symlink is repointed.
 - the author's own values (tailnet bind IP, his jargon `prompt`) move out of the code and
   into his `~/.config/hark/config.toml`. That file is **outside the repo** and is

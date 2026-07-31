@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.drycodeworks.dictated</string>
+  <string>com.drycodeworks.hark</string>
   <key>ProgramArguments</key>
   <array>
     <string>@UV@</string>
     <string>run</string>
     <string>uvicorn</string>
-    <string>dictated.app:app</string>
+    <string>hark.app:app</string>
     <string>--host</string>
     <string>@BIND@</string>
     <string>--port</string>
@@ -22,8 +22,8 @@
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/tmp/dictated.log</string>
+  <string>/tmp/hark.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/dictated.err</string>
+  <string>/tmp/hark.err</string>
 </dict>
 </plist>

@@ -7,7 +7,7 @@ reload 1.5 GB every time. Vocabulary biasing is applied at server startup via
 
 import httpx
 
-from dictated import config
+from hark import config
 
 
 class WhisperUnavailableError(Exception):

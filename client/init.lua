@@ -1,8 +1,8 @@
 --[[
-dictate — hold-to-talk client for the server's `dictated` service.
+hark — hold-to-talk client for the server's `hark` service.
 
 Hold Ctrl+Alt+Space, speak, release. rec (client/rec.swift, built by
-client/setup.sh) records the mic to a WAV, the WAV
+install-client.sh) records the mic to a WAV, the WAV
 is POSTed to the server, the transcript comes back in the HTTP response, and
 it lands on the clipboard and gets pasted (Cmd+V) into whatever app has
 focus - a Claude Code prompt in a remote tmux pane, Slack, a browser,
@@ -16,19 +16,19 @@ by one person on one pair of Macs. If something misbehaves, the Hammerspoon
 console (menu bar icon -> Console) is the first place to look, since Lua
 syntax and runtime errors show up there and nowhere else. Note that print()
 reaches only that console and is not persisted; anything worth diagnosing
-later is appended to ~/.hammerspoon/dictate.log instead.
+later is appended to ~/.hammerspoon/hark.log instead.
 ]]
 
 -- ============================================================================
--- Configuration — edit ~/.hammerspoon/dictate-config.lua, NOT this file.
+-- Configuration — edit ~/.hammerspoon/hark-config.lua, NOT this file.
 -- ============================================================================
 --
--- client/setup.sh generates that file for you. Its expected shape (see also
--- client/dictate-config.example.lua):
+-- install-client.sh generates that file for you. Its expected shape (see also
+-- client/hark-config.example.lua):
 --
 --   return {
 --     server = "http://127.0.0.1:8911/dictate",
---     key = "<the shared secret from the server's ~/.config/dictated/key>",
+--     key = "<the shared secret from the server's ~/.config/hark/key>",
 --     recorder = "/Users/you/.hammerspoon/rec",  -- optional; this is the default
 --   }
 --
@@ -39,45 +39,45 @@ later is appended to ~/.hammerspoon/dictate.log instead.
 -- in ~/.hammerspoon/, and setup.sh chmod 600's it because it holds a secret
 -- in plaintext.
 
-local configPath = os.getenv("HOME") .. "/.hammerspoon/dictate-config.lua"
+local configPath = os.getenv("HOME") .. "/.hammerspoon/hark-config.lua"
 local loadedOk, userConfig = pcall(dofile, configPath)
 if not loadedOk or type(userConfig) ~= "table" then
   userConfig = {}
   hs.alert.show(
-    "dictate: missing or broken " .. configPath .. " — run client/setup.sh",
+    "hark: missing or broken " .. configPath .. " — run install-client.sh",
     5
   )
 end
 
--- Loopback default: the single-machine setup, where dictated runs on this same
--- Mac. For the two-machine setup, set `server` in dictate-config.lua to the
+-- Loopback default: the single-machine setup, where hark runs on this same
+-- Mac. For the two-machine setup, set `server` in hark-config.lua to the
 -- transcribing machine's private address.
 local SERVER = userConfig.server or "http://127.0.0.1:8911/dictate"
-local DICTATE_KEY = userConfig.key
-local WAV_PATH = "/tmp/dictate.wav"
+local HARK_KEY = userConfig.key
+local WAV_PATH = "/tmp/hark.wav"
 
--- Deliberately NOT /tmp/dictate.wav: a stale probe file must never be
+-- Deliberately NOT /tmp/hark.wav: a stale probe file must never be
 -- mistaken for a real recorded utterance, and vice versa. Lives under
 -- ~/.hammerspoon/ (not /tmp) so it doesn't collide with anything else that
 -- cleans /tmp; deleted immediately after every probe regardless of outcome.
-local MIC_PROBE_PATH = os.getenv("HOME") .. "/.hammerspoon/.dictate-mic-probe.wav"
+local MIC_PROBE_PATH = os.getenv("HOME") .. "/.hammerspoon/.hark-mic-probe.wav"
 
--- Read by client/setup.sh's --doctor (and the end of a normal setup.sh run)
+-- Read by install-client.sh's --doctor (and the end of a normal setup.sh run)
 -- to learn whether HAMMERSPOON - not the terminal running setup.sh - can
 -- reach the microphone. TCC grants are per responsible-app: a probe run
 -- from the shell would test the terminal's permission, not Hammerspoon's,
 -- and would be worse than useless (a confidently wrong PASS). This file is
 -- the only reliable way for setup.sh to learn the real answer.
-local MIC_STATUS_PATH = os.getenv("HOME") .. "/.hammerspoon/.dictate-mic-status"
+local MIC_STATUS_PATH = os.getenv("HOME") .. "/.hammerspoon/.hark-mic-status"
 
 -- print() reaches the Hammerspoon console and nowhere else, and that console
 -- is not persisted - so a flake that happened an hour ago leaves no evidence
 -- anywhere on disk. rec's stderr is the ONLY thing that says why a
 -- recording failed, which makes it exactly the thing worth keeping.
-local LOG_PATH = os.getenv("HOME") .. "/.hammerspoon/dictate.log"
+local LOG_PATH = os.getenv("HOME") .. "/.hammerspoon/hark.log"
 
-if not DICTATE_KEY or DICTATE_KEY == "" then
-  hs.alert.show("dictate: no key configured in " .. configPath, 5)
+if not HARK_KEY or HARK_KEY == "" then
+  hs.alert.show("hark: no key configured in " .. configPath, 5)
 end
 
 -- ============================================================================
@@ -87,7 +87,7 @@ end
 -- Mirrors the server's logging discipline: diagnostics only, never transcript
 -- content. rec's stderr names the device or the failure, not speech.
 local function logLine(msg)
-  print("dictate: " .. msg)
+  print("hark: " .. msg)
   local f = io.open(LOG_PATH, "a")
   if f then
     f:write(os.date("%Y-%m-%d %H:%M:%S ") .. msg .. "\n")
@@ -119,7 +119,7 @@ local function extractDetail(body)
   return body
 end
 
--- client/setup.sh compiles client/rec.swift to here. userConfig.recorder
+-- install-client.sh compiles client/rec.swift to here. userConfig.recorder
 -- overrides it, for a build kept somewhere else.
 local RECORDER_PATH = os.getenv("HOME") .. "/.hammerspoon/rec"
 
@@ -140,7 +140,7 @@ end
 -- Settings -> Sound -> Input. Say so once rather than silently ignoring a
 -- key someone deliberately set.
 if userConfig.mic then
-  print("dictate: `mic` in " .. configPath .. " is no longer used - rec records "
+  print("hark: `mic` in " .. configPath .. " is no longer used - rec records "
     .. "the system default input. Choose it in System Settings -> Sound -> Input.")
 end
 
@@ -180,8 +180,8 @@ local function handleDictateResponse(status, body)
   if status < 0 then
     beep()
     hs.alert.show(
-      "dictate: can't reach the server (" .. SERVER .. ").\n"
-        .. "Check the tailnet is up (tailscale status) and dictated is running.\n"
+      "hark: can't reach the server (" .. SERVER .. ").\n"
+        .. "Check the tailnet is up (tailscale status) and hark is running.\n"
         .. tostring(body),
       6
     )
@@ -192,7 +192,7 @@ local function handleDictateResponse(status, body)
     local ok, parsed = pcall(hs.json.decode, body or "")
     if not ok or type(parsed) ~= "table" or type(parsed.text) ~= "string" then
       beep()
-      hs.alert.show("dictate: 200 OK but the response wasn't the expected JSON: " .. tostring(body), 6)
+      hs.alert.show("hark: 200 OK but the response wasn't the expected JSON: " .. tostring(body), 6)
       return
     end
 
@@ -204,9 +204,9 @@ local function handleDictateResponse(status, body)
     end
 
     -- Log the LENGTH only, never the transcript itself, mirroring the
-    -- server's own logging discipline (dictated/app.py) - the console is
+    -- server's own logging discipline (src/hark/app.py) - the console is
     -- local, but there's no reason to put speech content in a log at all.
-    print("dictate: pasting " .. #parsed.text .. " chars")
+    print("hark: pasting " .. #parsed.text .. " chars")
 
     -- Deliberately NOT saving/restoring the previous clipboard contents.
     -- Leaving the transcript on the clipboard means a misfired paste (wrong
@@ -227,33 +227,33 @@ local function handleDictateResponse(status, body)
 
   if status == 401 then
     hs.alert.show(
-      "dictate: 401 unauthorized — " .. detail .. "\n"
+      "hark: 401 unauthorized — " .. detail .. "\n"
         .. "Check that the key in " .. configPath .. " matches the server's "
-        .. "~/.config/dictated/key (re-run client/setup.sh to refetch it).",
+        .. "~/.config/hark/key (re-run install-client.sh to refetch it).",
       7
     )
   elseif status == 415 then
     hs.alert.show(
-      "dictate: 415 unsupported media type — " .. detail .. "\n"
+      "hark: 415 unsupported media type — " .. detail .. "\n"
         .. "This is a client bug (wrong Content-Type header), not a mic problem. "
         .. "Please report it.",
       7
     )
   elseif status == 400 then
     hs.alert.show(
-      "dictate: 400 bad request — " .. detail .. "\n"
+      "hark: 400 bad request — " .. detail .. "\n"
         .. "Almost certainly a microphone permission problem: check System "
         .. "Settings -> Privacy & Security -> Microphone -> Hammerspoon is ON.",
       7
     )
   elseif status == 503 then
     hs.alert.show(
-      "dictate: 503 — whisper-server is down on the server. " .. detail .. "\n"
-        .. "Check /tmp/whisper-server.err on the server.",
+      "hark: 503 — whisper-server is down on the server. " .. detail .. "\n"
+        .. "Check /tmp/hark-whisper.err on the server.",
       7
     )
   else
-    hs.alert.show("dictate: unexpected HTTP " .. tostring(status) .. " — " .. detail, 6)
+    hs.alert.show("hark: unexpected HTTP " .. tostring(status) .. " — " .. detail, 6)
   end
 end
 
@@ -262,9 +262,9 @@ end
 -- ============================================================================
 
 local function sendRecording()
-  if not DICTATE_KEY or DICTATE_KEY == "" then
+  if not HARK_KEY or HARK_KEY == "" then
     beep()
-    hs.alert.show("dictate: no key configured — run client/setup.sh or edit " .. configPath, 5)
+    hs.alert.show("hark: no key configured — run install-client.sh or edit " .. configPath, 5)
     return
   end
 
@@ -272,7 +272,7 @@ local function sendRecording()
   if not f then
     beep()
     hs.alert.show(
-      "dictate: " .. WAV_PATH .. " was never written. Check "
+      "hark: " .. WAV_PATH .. " was never written. Check "
         .. LOG_PATH .. " — rec logs a reason there whenever it exits non-zero.",
       6
     )
@@ -284,7 +284,7 @@ local function sendRecording()
   if not audio or #audio == 0 then
     beep()
     hs.alert.show(
-      "dictate: recorded a zero-byte file.\n"
+      "hark: recorded a zero-byte file.\n"
         .. "Check System Settings -> Privacy & Security -> Microphone -> "
         .. "Hammerspoon is ON. rec runs as Hammerspoon's CHILD process, so "
         .. "macOS attributes microphone access to Hammerspoon, not to rec.",
@@ -293,9 +293,9 @@ local function sendRecording()
     return
   end
 
-  print("dictate: sending " .. #audio .. " bytes to " .. SERVER)
+  print("hark: sending " .. #audio .. " bytes to " .. SERVER)
   hs.http.asyncPost(SERVER, audio, {
-    ["X-Dictate-Key"] = DICTATE_KEY,
+    ["X-Hark-Key"] = HARK_KEY,
     ["Content-Type"] = "audio/wav",
   }, handleDictateResponse)
 end
@@ -337,9 +337,9 @@ local function startRecording()
     return -- already recording; guards a spurious double key-down
   end
 
-  if not DICTATE_KEY or DICTATE_KEY == "" then
+  if not HARK_KEY or HARK_KEY == "" then
     beep()
-    hs.alert.show("dictate: no key configured — run client/setup.sh or edit " .. configPath, 5)
+    hs.alert.show("hark: no key configured — run install-client.sh or edit " .. configPath, 5)
     return
   end
 
@@ -347,8 +347,8 @@ local function startRecording()
   if not recorderPath then
     beep()
     hs.alert.show(
-      "dictate: the recorder is not built (looked in " .. RECORDER_PATH .. "). "
-        .. "Run client/setup.sh.",
+      "hark: the recorder is not built (looked in " .. RECORDER_PATH .. "). "
+        .. "Run install-client.sh.",
       6
     )
     return
@@ -361,7 +361,7 @@ local function startRecording()
     recorderTask = nil
     hideRecordingIndicator()
     beep()
-    hs.alert.show("dictate: the recorder failed to start (" .. recorderPath .. ")", 5)
+    hs.alert.show("hark: the recorder failed to start (" .. recorderPath .. ")", 5)
   end
 end
 
@@ -405,7 +405,7 @@ hs.hotkey.bind({ "ctrl", "alt" }, "space", startRecording, stopRecording)
 -- keyboard event - the bind call succeeds either way, and the hotkey then
 -- just silently never fires. No error, no console message: holding
 -- Ctrl+Alt+Space does literally nothing, which is indistinguishable from
--- several other possible causes (client/setup.sh never having launched
+-- several other possible causes (install-client.sh never having launched
 -- Hammerspoon at all, a broken config, etc.) unless this is called out
 -- explicitly, loudly, right here at load time.
 --
@@ -413,7 +413,7 @@ hs.hotkey.bind({ "ctrl", "alt" }, "space", startRecording, stopRecording)
 -- boolean - it does not itself trigger the system permission prompt.
 if not hs.accessibilityState() then
   hs.alert.show(
-    "dictate: Accessibility is NOT granted to Hammerspoon.\n"
+    "hark: Accessibility is NOT granted to Hammerspoon.\n"
       .. "The hotkey (Ctrl+Alt+Space) CANNOT work until this is fixed.\n"
       .. "System Settings -> Privacy & Security -> Accessibility -> turn ON Hammerspoon.",
     20
@@ -444,8 +444,8 @@ local function probeMicrophone()
     -- Not a permission problem - the recorder simply isn't built. Leave
     -- MIC_STATUS_PATH untouched (setup.sh's --doctor reports "missing" and
     -- points at this) rather than writing a misleading "denied".
-    print("dictate: microphone probe skipped - recorder not built at " .. RECORDER_PATH
-      .. " (run client/setup.sh).")
+    print("hark: microphone probe skipped - recorder not built at " .. RECORDER_PATH
+      .. " (run install-client.sh).")
     return
   end
 
@@ -459,7 +459,7 @@ local function probeMicrophone()
       statusFile:write((ok and "ok" or "denied") .. "\n" .. os.date("%Y-%m-%d %H:%M:%S") .. "\n")
       statusFile:close()
     else
-      print("dictate: could not write " .. MIC_STATUS_PATH .. " - setup.sh --doctor's mic check will report it as missing.")
+      print("hark: could not write " .. MIC_STATUS_PATH .. " - setup.sh --doctor's mic check will report it as missing.")
     end
 
     if ok then
@@ -468,10 +468,10 @@ local function probeMicrophone()
     end
 
     if detail then
-      print("dictate: microphone probe failed - " .. detail)
+      print("hark: microphone probe failed - " .. detail)
     end
     hs.alert.show(
-      "dictate: Hammerspoon needs Microphone permission.\n"
+      "hark: Hammerspoon needs Microphone permission.\n"
         .. "A consent dialog should have appeared just now - click Allow, then\n"
         .. "reload this config (or just try the hotkey again).\n"
         .. "If you missed the dialog or it never appeared: System Settings -> "
@@ -502,4 +502,4 @@ end
 
 probeMicrophone()
 
-hs.alert.show("dictate loaded", 1.5)
+hs.alert.show("hark loaded", 1.5)

@@ -20,17 +20,17 @@ local tasks, logged, deferrals, pressKey, releaseKey, missingPaths
 -- Installed for the WHOLE run, not just around the load. logLine() fires from
 -- the task callbacks the tests drive, long after loading - restoring io.open
 -- any earlier lets this test append its fake stderr to the developer's real
--- ~/.hammerspoon/dictate.log, which is the file you would go on to read when
+-- ~/.hammerspoon/hark.log, which is the file you would go on to read when
 -- diagnosing a genuine failure.
 local realDofile, realOpen = dofile, io.open
 dofile = function(path)
-  if path:match("dictate%-config") then
+  if path:match("hark%-config") then
     return { server = "http://127.0.0.1:1/dictate", key = "k" }
   end
   return realDofile(path)
 end
 io.open = function(path, mode)
-  if path:match("dictate%.log") then
+  if path:match("hark%.log") then
     return { write = function(_, s) logged[#logged + 1] = s end, close = function() end }
   end
   if path:match("%.wav$") then return nil end

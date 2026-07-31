@@ -7,7 +7,7 @@ and the one a new user should get without reading anything.
 The two-machine setup — a laptop recording, a desktop transcribing — is the
 same architecture with a different bind address. Personal values (a tailnet
 bind address, a vocabulary prompt, a calibrated silence threshold) belong in
-``~/.config/dictate/config.toml``, which lives outside the repo and is never
+``~/.config/hark/config.toml``, which lives outside the repo and is never
 published. See ``config.example.toml``.
 """
 
@@ -17,7 +17,7 @@ import tomllib
 from pathlib import Path
 
 CONFIG_FILE = Path(
-    os.environ.get("DICTATE_CONFIG", Path.home() / ".config/dictate/config.toml")
+    os.environ.get("HARK_CONFIG", Path.home() / ".config/hark/config.toml")
 )
 
 
@@ -46,11 +46,11 @@ WHISPER_HOST = "127.0.0.1"
 WHISPER_PORT = _whisper.get("port", 8910)
 WHISPER_URL = f"http://{WHISPER_HOST}:{WHISPER_PORT}"
 
-# dictated: loopback by default, so the stock install exposes nothing. Set
+# hark: loopback by default, so the stock install exposes nothing. Set
 # server.bind to a private address (e.g. a tailnet IP) for the two-machine
 # setup. Never 0.0.0.0 — see the plist drift guard, which enforces this.
-DICTATED_HOST = _server.get("bind", "127.0.0.1")
-DICTATED_PORT = _server.get("port", 8911)
+HARK_HOST = _server.get("bind", "127.0.0.1")
+HARK_PORT = _server.get("port", 8911)
 
 MODEL_PATH = Path(
     _whisper.get("model", "~/.local/share/whisper-cpp/ggml-large-v3-turbo.bin")
@@ -90,27 +90,27 @@ CONNECT_TIMEOUT_S = 5.0
 # rms on every request precisely so you can calibrate from evidence.
 SILENCE_RMS_THRESHOLD = _audio.get("silence_rms_threshold", 150.0)
 
-# The shared secret gating POST /dictate, sent by the client as X-Dictate-Key.
+# The shared secret gating POST /dictate, sent by the client as X-Hark-Key.
 #
 # Without it the endpoint was CSRF-reachable: a page open in a browser on any
 # machine that can route to this one could POST a WAV of the attacker's choosing
 # (a CORS-simple request needs no preflight) and thereby choose the text typed
-# into a live agent's terminal. X-Dictate-Key is a non-safelisted header, so
+# into a live agent's terminal. X-Hark-Key is a non-safelisted header, so
 # requiring it forces a preflight, which fails - no CORS middleware is installed.
 #
 # Deliberately not a credential system: one user, one key, one file. The key is
 # generated on first use and persisted, so the client can be configured once by
 # reading the file. It lives outside the repo and is never committed.
-KEY_FILE = Path.home() / ".config/dictated/key"
+KEY_FILE = Path.home() / ".config/hark/key"
 
 
 def _key_file() -> Path:
-    return Path(os.environ.get("DICTATE_KEY_FILE", KEY_FILE))
+    return Path(os.environ.get("HARK_KEY_FILE", KEY_FILE))
 
 
-def dictate_key() -> str:
+def hark_key() -> str:
     """Return the shared secret, generating and persisting one if needed."""
-    from_env = os.environ.get("DICTATE_KEY")
+    from_env = os.environ.get("HARK_KEY")
     if from_env:
         return from_env
 

@@ -4,9 +4,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from dictated import app as app_module
-from dictated.app import app
-from dictated.whisper import WhisperUnavailableError
+from hark import app as app_module
+from hark.app import app
+from hark.whisper import WhisperUnavailableError
 
 from conftest import TEST_KEY
 
@@ -14,7 +14,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 WAV = (FIXTURES / "hello.wav").read_bytes()          # real speech, RMS ~4775
 SILENCE = (FIXTURES / "silence.wav").read_bytes()    # digital silence, RMS 0
 
-HEADERS = {"content-type": "audio/wav", "x-dictate-key": TEST_KEY}
+HEADERS = {"content-type": "audio/wav", "x-hark-key": TEST_KEY}
 
 
 @pytest.fixture
@@ -137,7 +137,7 @@ def test_health_endpoint():
 # which is a CORS-*simple* request - no preflight - so the attacker chose the
 # WAV and therefore chose the text that landed in the response.
 #
-# Both X-Dictate-Key and Content-Type: audio/wav are non-safelisted headers
+# Both X-Hark-Key and Content-Type: audio/wav are non-safelisted headers
 # (only text/plain, multipart/form-data and x-www-form-urlencoded are safelisted
 # Content-Type values), so requiring either forces the browser to preflight; no
 # CORS middleware is installed, so the preflight fails and the browser blocks
@@ -155,7 +155,7 @@ def test_dictate_rejects_a_request_with_the_wrong_key(stub_transcribe):
     response = TestClient(app).post(
         "/dictate",
         content=WAV,
-        headers={"content-type": "audio/wav", "x-dictate-key": "not-the-key"},
+        headers={"content-type": "audio/wav", "x-hark-key": "not-the-key"},
     )
     assert response.status_code == 401
 
@@ -167,14 +167,14 @@ def test_dictate_rejects_a_wrong_content_type(stub_transcribe):
     response = TestClient(app).post(
         "/dictate",
         content=WAV,
-        headers={"content-type": "text/plain", "x-dictate-key": TEST_KEY},
+        headers={"content-type": "text/plain", "x-hark-key": TEST_KEY},
     )
     assert response.status_code == 415
 
 
 def test_dictate_rejects_a_missing_content_type(stub_transcribe):
     response = TestClient(app).post(
-        "/dictate", content=WAV, headers={"x-dictate-key": TEST_KEY}
+        "/dictate", content=WAV, headers={"x-hark-key": TEST_KEY}
     )
     assert response.status_code in (401, 415)
 
@@ -186,7 +186,7 @@ def test_dictate_accepts_content_type_with_parameters(stub_transcribe):
         content=WAV,
         headers={
             "content-type": "audio/wav; charset=binary",
-            "x-dictate-key": TEST_KEY,
+            "x-hark-key": TEST_KEY,
         },
     )
     assert response.status_code == 200
@@ -202,10 +202,10 @@ def test_health_needs_no_key():
 
 
 def test_dictated_logger_actually_emits_info():
-    """Under uvicorn's logging config the `dictated` logger had no handler and
+    """Under uvicorn's logging config the `hark` logger had no handler and
     an effective level of WARNING, so the success line was silently dropped.
     """
-    assert logging.getLogger("dictated").getEffectiveLevel() <= logging.INFO
+    assert logging.getLogger("hark").getEffectiveLevel() <= logging.INFO
 
 
 def test_success_log_records_length_but_never_the_transcript(stub_transcribe, caplog):
@@ -213,7 +213,7 @@ def test_success_log_records_length_but_never_the_transcript(stub_transcribe, ca
     contain the transcript itself. Audio and text never leave this hardware;
     that includes not settling into a world-readable file in /tmp.
     """
-    with caplog.at_level(logging.INFO, logger="dictated"):
+    with caplog.at_level(logging.INFO, logger="hark"):
         response = TestClient(app).post("/dictate", content=WAV, headers=HEADERS)
     assert response.status_code == 200
 

@@ -9,8 +9,8 @@ makes drift a test failure rather than a mystery.
 
 Run it directly to install the services::
 
-    uv run python -m dictated.plists            # render to ~/Library/LaunchAgents
-    uv run python -m dictated.plists --print    # render to stdout, install nothing
+    uv run python -m hark.plists            # render to ~/Library/LaunchAgents
+    uv run python -m hark.plists --print    # render to stdout, install nothing
 """
 
 import argparse
@@ -19,15 +19,15 @@ import sys
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-from dictated import config
+from hark import config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 TEMPLATE_DIR = REPO_ROOT / "launchd"
 LAUNCH_AGENTS = Path.home() / "Library/LaunchAgents"
 
 TEMPLATES = (
-    "com.drycodeworks.dictated.plist",
-    "com.drycodeworks.whisper-server.plist",
+    "com.drycodeworks.hark.plist",
+    "com.drycodeworks.hark-whisper.plist",
 )
 
 
@@ -47,8 +47,8 @@ def substitutions() -> dict[str, str]:
         "@UV@": _tool("uv", "/opt/homebrew/bin/uv"),
         "@WHISPER_SERVER@": _tool("whisper-server", "/opt/homebrew/bin/whisper-server"),
         "@WORKDIR@": str(REPO_ROOT),
-        "@BIND@": config.DICTATED_HOST,
-        "@PORT@": str(config.DICTATED_PORT),
+        "@BIND@": config.HARK_HOST,
+        "@PORT@": str(config.HARK_PORT),
         "@WHISPER_HOST@": config.WHISPER_HOST,
         "@WHISPER_PORT@": str(config.WHISPER_PORT),
         "@MODEL@": str(config.MODEL_PATH),

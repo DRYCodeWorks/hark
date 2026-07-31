@@ -1,4 +1,4 @@
-"""The dictated service: audio in, transcript out.
+"""The hark service: audio in, transcript out.
 
 Deliberately contains no business logic - sanitization and ASR each live in
 their own module and are imported here by name so tests can fake them. The
@@ -14,16 +14,16 @@ import sys
 
 from fastapi import FastAPI, HTTPException, Request
 
-from dictated import config
-from dictated.audio import InvalidAudioError, rms
-from dictated.sanitize import sanitize
-from dictated.whisper import WhisperUnavailableError, transcribe
+from hark import config
+from hark.audio import InvalidAudioError, rms
+from hark.sanitize import sanitize
+from hark.whisper import WhisperUnavailableError, transcribe
 
-# Under uvicorn's logging config the `dictated` logger has no handler and an
+# Under uvicorn's logging config the `hark` logger has no handler and an
 # effective level of WARNING, so every logger.info() below was silently
 # dropped - including the success line, the only server-side record that a
 # transcription happened. stdout, not stderr, because launchd routes
-# StandardOutPath to /tmp/dictated.log, which is where that record is
+# StandardOutPath to /tmp/hark.log, which is where that record is
 # expected to be found.
 logging.basicConfig(
     level=logging.INFO,
@@ -31,14 +31,14 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
-logger = logging.getLogger("dictated")
+logger = logging.getLogger("hark")
 # Explicit, so the level holds even if something else already configured the
 # root logger and made basicConfig() a no-op.
 logger.setLevel(logging.INFO)
 
-app = FastAPI(title="dictated")
+app = FastAPI(title="hark")
 
-KEY_HEADER = "x-dictate-key"
+KEY_HEADER = "x-hark-key"
 AUDIO_WAV = "audio/wav"
 
 # Silence (energy gate trips, or the transcript has no alphanumeric content)
@@ -57,16 +57,16 @@ def _authorize(request: Request) -> None:
     Both checks matter, and each one independently defeats the drive-by CSRF:
     a page in a browser on any tailnet device could POST a WAV of the
     attacker's choosing - a CORS-*simple* request, so no preflight - and
-    thereby choose the text returned in the response. X-Dictate-Key and a
+    thereby choose the text returned in the response. X-Hark-Key and a
     Content-Type of audio/wav are both NON-safelisted (only text/plain,
     multipart/form-data and x-www-form-urlencoded are safelisted Content-Type
     values), so requiring them forces a preflight; no CORS middleware is
     installed, so that preflight fails and the browser blocks the request.
     """
     presented = request.headers.get(KEY_HEADER, "")
-    if not secrets.compare_digest(presented, config.dictate_key()):
+    if not secrets.compare_digest(presented, config.hark_key()):
         logger.warning("rejected unauthenticated POST /dictate")
-        raise HTTPException(status_code=401, detail="missing or invalid X-Dictate-Key")
+        raise HTTPException(status_code=401, detail="missing or invalid X-Hark-Key")
 
     # Ignore parameters: `audio/wav; charset=binary` is still audio/wav.
     media_type = request.headers.get("content-type", "").split(";")[0].strip().lower()

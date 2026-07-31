@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from dictated import config
-from dictated.audio import InvalidAudioError, rms
+from hark import config
+from hark.audio import InvalidAudioError, rms
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SILENCE = (FIXTURES / "silence.wav").read_bytes()

@@ -1,4 +1,4 @@
-from dictated.sanitize import sanitize
+from hark.sanitize import sanitize
 
 
 def test_collapses_newlines_to_spaces():

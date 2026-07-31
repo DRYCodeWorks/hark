@@ -2,8 +2,8 @@ import httpx
 import pytest
 import respx
 
-from dictated import config
-from dictated.whisper import transcribe, WhisperUnavailableError
+from hark import config
+from hark.whisper import transcribe, WhisperUnavailableError
 
 BASE = "http://127.0.0.1:8910"
 

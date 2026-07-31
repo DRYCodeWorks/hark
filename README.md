@@ -1,4 +1,4 @@
-# dictate
+# hark
 
 Push-to-talk dictation into whatever has focus — most usefully a terminal
 session reached over SSH or mosh, but really anywhere: Slack, a browser, any
@@ -27,7 +27,7 @@ either: agentic CLIs like Claude Code paint their own input box (there is no
 readline buffer for a ZLE widget to hook), and any keybinding evaluated over
 SSH runs on the *remote* host, which has no microphone.
 
-`dictate` sidesteps this instead of fighting it. Capture and paste happen on
+`hark` sidesteps this instead of fighting it. Capture and paste happen on
 the machine you are physically touching, so the pane you are looking at is
 the pane that receives the text. Nothing has to guess a target.
 
@@ -40,12 +40,12 @@ exposed to nothing.
 ⌃⌥Space held
   └─► rec (AVAudioEngine) records the mic → 16 kHz mono WAV
 ⌃⌥Space released
-  └─► POST /dictate ─────────────►  dictated  (HTTP service)
-        X-Dictate-Key                  │
-        Content-Type: audio/wav        ├─► RMS energy gate (silence → "")
-                                       ├─► whisper-server (model resident)
-                                       └─► sanitize (collapse to one line)
-                                  ◄── 200 {"text": "..."}
+  └─► POST /dictate ─────────────►  hark  (HTTP service)
+        X-Hark-Key                       │
+        Content-Type: audio/wav          ├─► RMS energy gate (silence → "")
+                                         ├─► whisper-server (model resident)
+                                         └─► sanitize (collapse to one line)
+                                    ◄── 200 {"text": "..."}
   ├─► put the text on the clipboard
   └─► synthesize ⌘V into the FOCUSED app
         │
@@ -71,52 +71,44 @@ re-speaking. See the comment above `hs.pasteboard.setContents` in
 
 ## Install
 
+```bash
+git clone https://github.com/DRYCodeWorks/hark && cd hark
+./install-server.sh     # transcription side
+./install-client.sh     # hotkey, mic, paste
+```
+
+On one Mac, run both. On two, run `install-server.sh` on the machine that
+holds the model and `install-client.sh` on the one you type at.
+
 ### 1. Server
 
-```bash
-brew install whisper-cpp uv
+`./install-server.sh` installs `whisper-cpp` and `uv` via Homebrew, downloads
+a model (~1.5 GB, skipped if present), generates the shared secret, renders
+both launchd plists from your config, loads them, and waits for `/health`. It
+refuses to report success if the service never answers.
 
-# Fetch a model. large-v3-turbo is the default; any whisper.cpp GGML works.
-mkdir -p ~/.local/share/whisper-cpp
-curl -L -o ~/.local/share/whisper-cpp/ggml-large-v3-turbo.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
-
-# Render the launchd plists from config, then load them.
-uv run python -m dictated.plists
-for l in dictated whisper-server; do
-  launchctl bootout gui/$(id -u)/com.drycodeworks.$l 2>/dev/null
-  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.drycodeworks.$l.plist
-done
-
-curl -s http://127.0.0.1:8911/health    # {"status":"ok"}
-```
+It is safe to re-run, and re-running is how you apply a config change — it
+re-renders and reloads.
 
 | Service | Binds to | Logs |
 |---|---|---|
-| `whisper-server` | `127.0.0.1:8910` — loopback only, always | `/tmp/whisper-server.log`, `/tmp/whisper-server.err` |
-| `dictated` | `127.0.0.1:8911` by default, never `0.0.0.0` | `/tmp/dictated.log`, `/tmp/dictated.err` |
+| `com.drycodeworks.hark-whisper` | `127.0.0.1:8910` — loopback only, always | `/tmp/hark-whisper.log`, `/tmp/hark-whisper.err` |
+| `com.drycodeworks.hark` | `127.0.0.1:8911` by default, never `0.0.0.0` | `/tmp/hark.log`, `/tmp/hark.err` |
 
-The plists are **rendered from templates** in `launchd/`, not edited by hand,
-because launchd reads its own XML and cannot see `config.py` — so the two
-drift silently. `tests/test_launchd_config_sync.py` renders the templates and
-asserts they agree with config, including that `dictated` is never bound to
-`0.0.0.0` and that `whisper-server` is never bound off loopback.
+`./install-server.sh --doctor` re-runs the checks alone, read-only.
 
-After changing anything in `~/.config/dictate/config.toml`, re-render and
-reload:
+The plists are **rendered from templates** in `launchd/`, never edited by
+hand, because launchd reads its own XML and cannot see `config.py` — so the
+two drift silently. `tests/test_launchd_config_sync.py` renders the templates
+and asserts they agree with config, including that `hark` is never bound to
+`0.0.0.0` and that the ASR server is never bound off loopback.
 
-```bash
-uv run python -m dictated.plists     # prints the reload commands
-```
-
-The shared secret is generated on the first request and persisted at
-`~/.config/dictated/key` (mode 600). It is never committed — it lives outside
-the repo entirely.
+The shared secret lives at `~/.config/hark/key` (mode 600), outside the repo.
 
 ### 2. Client
 
 ```bash
-./client/setup.sh
+./install-client.sh
 ```
 
 It:
@@ -127,7 +119,7 @@ It:
 3. asks you nothing about microphones — `rec` records the system default
    input, chosen in System Settings → Sound → Input,
 4. curls `/health` and tells you plainly if the server isn't reachable,
-5. writes `~/.hammerspoon/dictate-config.lua` (mode 600 — it holds the secret
+5. writes `~/.hammerspoon/hark-config.lua` (mode 600 — it holds the secret
    in plaintext) and links `client/init.lua` to `~/.hammerspoon/init.lua`. If
    that path already exists as a real file rather than a symlink, this is a
    **hard stop** with the exact command to fix it, not a warning you can miss,
@@ -145,7 +137,7 @@ Safe to re-run at any time; every step checks current state first.
 ### 3. Configuration
 
 Everything is optional — the defaults are the working single-machine setup.
-Copy `config.example.toml` to `~/.config/dictate/config.toml` to change the
+Copy `config.example.toml` to `~/.config/hark/config.toml` to change the
 bind address, the model path, the silence threshold, or the vocabulary prompt.
 
 The **vocabulary prompt** is the cheapest accuracy win available: proper nouns
@@ -153,7 +145,7 @@ and jargon that come back mangled usually come back correct once listed in
 `whisper.prompt`. It ships empty, because one person's jargon is another
 person's noise.
 
-### `./client/setup.sh --doctor`
+### `./install-client.sh --doctor`
 
 Read-only — changes nothing, exits non-zero if anything is wrong. Run it any
 time the hotkey stops working, instead of re-running the whole install:
@@ -161,10 +153,10 @@ time the hotkey stops working, instead of re-running the whole install:
 - Hammerspoon.app installed
 - Hammerspoon actually running
 - `~/.hammerspoon/init.lua` is a symlink to this repo's `client/init.lua`
-- `~/.hammerspoon/dictate-config.lua` exists, is mode 600, has a non-empty key
+- `~/.hammerspoon/hark-config.lua` exists, is mode 600, has a non-empty key
 - `rec` is built, and which binary `init.lua` would actually resolve
 - Hammerspoon can reach the microphone — read from
-  `~/.hammerspoon/.dictate-mic-status`, the outcome `client/init.lua`'s own
+  `~/.hammerspoon/.hark-mic-status`, the outcome `client/init.lua`'s own
   startup probe wrote. This is the only reliable signal: `--doctor`
   deliberately does **not** run its own probe, since that would test the
   *terminal's* microphone permission rather than Hammerspoon's — a different
@@ -201,7 +193,7 @@ understand, so they are worth reading before you hit them.
    So permission must be **triggered**, never pre-granted. `client/init.lua`
    runs a short (~0.4s) `rec` probe on every config load, which is what fires
    the consent dialog. On success it stays silent and writes `ok` to
-   `~/.hammerspoon/.dictate-mic-status`; on failure it shows a long-lived
+   `~/.hammerspoon/.hark-mic-status`; on failure it shows a long-lived
    alert, writes `denied`, and logs `rec`'s stderr. Once the probe has run
    once, Hammerspoon **is** listed in the Microphone pane, so the recovery
    path works.
@@ -216,7 +208,7 @@ release. The sentence should appear at the prompt within a couple of seconds,
 Useful when the Mac you type on can't spare 1.5 GB for a resident model.
 
 On the transcribing machine, set the bind address in
-`~/.config/dictate/config.toml` to a private address it is reachable at —
+`~/.config/hark/config.toml` to a private address it is reachable at —
 a Tailscale/tailnet IP, a VPN address, or a LAN address you trust — then
 re-render and reload the plists:
 
@@ -226,7 +218,7 @@ bind = "10.x.x.x"     # never 0.0.0.0
 ```
 
 On the recording machine, point `server` in
-`~/.hammerspoon/dictate-config.lua` at the same address. `setup.sh` will offer
+`~/.hammerspoon/hark-config.lua` at the same address. `setup.sh` will offer
 to fetch the key over SSH.
 
 `whisper.host` stays loopback in both cases and is not configurable. It is the
@@ -254,38 +246,38 @@ Fn action). It is **not** a drop-in change to the `bind` call above.
 
 ## Troubleshooting
 
-**Start here, every time:** `./client/setup.sh --doctor`. Most "nothing
+**Start here, every time:** `./install-client.sh --doctor`. Most "nothing
 happens" reports are one of its checks, not a deeper bug.
 
 0. **Nothing happened, but `--doctor` passes everything.** Check you're
    pressing **Ctrl+Alt+Space — all three keys together**. Then open the
    Hammerspoon console (menu bar icon → Console) and look for a Lua error.
    If Accessibility is missing, the hotkey silently never fires.
-1. **`/tmp/dictate.wav` is zero bytes, or the microphone check FAILs.** A
+1. **`/tmp/hark.wav` is zero bytes, or the microphone check FAILs.** A
    microphone permission problem almost every time: System Settings → Privacy
    & Security → Microphone → Hammerspoon must be ON. If Hammerspoon isn't
    listed at all, it hasn't asked yet — reload its config to re-run the probe.
 2. **A beep and an alert naming an HTTP status.** The alert names the likely
    cause:
-   - **401** — the key in `~/.hammerspoon/dictate-config.lua` doesn't match
-     `~/.config/dictated/key` on the server. Re-run `client/setup.sh`.
+   - **401** — the key in `~/.hammerspoon/hark-config.lua` doesn't match
+     `~/.config/hark/key` on the server. Re-run `install-client.sh`.
    - **415** — a client bug in the `Content-Type` header; shouldn't happen
      with an unmodified `init.lua`.
    - **400** — the server rejected the audio; usually the same mic-permission
      issue as #1, caught server-side.
-   - **503** — `whisper-server` is down. Check `/tmp/whisper-server.err`.
+   - **503** — `whisper-server` is down. Check `/tmp/hark-whisper.err`.
    - **Negative status / can't reach the server** — connection failure. Check
-     the network path and `launchctl list | grep dictated`.
-3. **The server side looks broken.** `tail -f /tmp/dictated.log` and
-   `/tmp/dictated.err` (server errors, and the length — never the content —
-   of each transcript); `/tmp/whisper-server.err` for ASR crashes.
+     the network path and `launchctl list | grep hark`.
+3. **The server side looks broken.** `tail -f /tmp/hark.log` and
+   `/tmp/hark.err` (server errors, and the length — never the content —
+   of each transcript); `/tmp/hark-whisper.err` for ASR crashes.
 4. **It "works" but pastes nothing and says "heard nothing."** Not a bug: the
    audio was too quiet to clear the energy gate. Whisper hallucinates
    confident short phrases — famously "Thank you." — on silence, so this is
    filtered on the *audio*, not on the text. Speak louder or closer, check the
    input device, and see `SILENCE_RMS_THRESHOLD` below.
 
-**`~/.hammerspoon/dictate.log` is the load-bearing diagnostic.** Hammerspoon's
+**`~/.hammerspoon/hark.log` is the load-bearing diagnostic.** Hammerspoon's
 `print()` reaches only the in-app console, which is not persisted and cannot be
 read out of band — a flake an hour old otherwise leaves zero evidence anywhere.
 `init.lua` appends `rec`'s exit code and stderr to that file on every non-zero
@@ -301,7 +293,7 @@ knowing:
 microphone.** `SILENCE_RMS_THRESHOLD = 150.0` sits ~16× above the noise floor
 that produces hallucinated text and ~21× below normal speech, measured with
 `say`-generated audio. It has not misfired in real use, but a different mic in
-a different room may need a different number. `dictated` logs the measured rms
+a different room may need a different number. `hark` logs the measured rms
 on every request precisely so you can calibrate from evidence instead of
 guessing. Aim for ~500+ for headroom.
 
@@ -365,16 +357,17 @@ transient.
 ## Repo layout
 
 ```
+install-server.sh          transcription side: deps, model, plists, services
+install-client.sh          hotkey/mic/paste side, plus --doctor
 client/
-  init.lua                    Hammerspoon client
-  rec.swift                   AVAudioEngine recorder, built by setup.sh
-  setup.sh                    client install + --doctor
-  dictate-config.example.lua  shape of ~/.hammerspoon/dictate-config.lua
-config.example.toml           shape of ~/.config/dictate/config.toml
-src/dictated/                 the HTTP service
-launchd/                      plist templates, rendered by dictated.plists
-tests/                        pytest suite (61 tests)
-docs/                         design spec + implementation plan
+  init.lua                 Hammerspoon client
+  rec.swift                AVAudioEngine recorder, built at install time
+  hark-config.example.lua  shape of ~/.hammerspoon/hark-config.lua
+config.example.toml        shape of ~/.config/hark/config.toml
+src/hark/                  the HTTP service
+launchd/                   plist templates, rendered by hark.plists
+tests/                     pytest suite (61 tests)
+docs/                      design spec + implementation plan
 ```
 
 ## License

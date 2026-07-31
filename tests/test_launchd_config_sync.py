@@ -1,10 +1,10 @@
-"""Guard against launchd plist drift from src/dictated/config.py.
+"""Guard against launchd plist drift from src/hark/config.py.
 
 The launchd plists carry values (host, port, model path, vocab prompt) that
 MUST match config.py — launchd doesn't read config.py, it reads its own XML.
 Nothing enforces agreement except a human reading both files side by side.
 
-The plists are now rendered from templates by ``dictated.plists``, so these
+The plists are now rendered from templates by ``hark.plists``, so these
 tests render them and parse the result with plistlib. That closes a loop the
 old version could not: a template that loses a placeholder, or a substitution
 that stops reaching config, now fails here instead of silently drifting into
@@ -17,11 +17,11 @@ from pathlib import Path
 
 import pytest
 
-from dictated import config, plists
+from hark import config, plists
 
 TEMPLATE_DIR = Path(plists.TEMPLATE_DIR)
-WHISPER_PLIST = "com.drycodeworks.whisper-server.plist"
-DICTATED_PLIST = "com.drycodeworks.dictated.plist"
+WHISPER_PLIST = "com.drycodeworks.hark-whisper.plist"
+DICTATED_PLIST = "com.drycodeworks.hark.plist"
 
 
 def render_plist(name: str) -> dict:
@@ -105,16 +105,16 @@ class TestDictatedPlist:
 
     def test_host_matches_config(self):
         plist_host = arg_after(self.args, "--host")
-        assert plist_host == config.DICTATED_HOST
+        assert plist_host == config.HARK_HOST
 
     def test_port_matches_config(self):
         plist_port = arg_after(self.args, "--port")
-        assert plist_port == str(config.DICTATED_PORT)
+        assert plist_port == str(config.HARK_PORT)
 
     def test_host_is_not_wildcard_bind(self):
         # Asserted against the rendered plist's literal value, not just against
-        # config.DICTATED_HOST, so this still catches the failure mode even if
-        # someone writes 0.0.0.0 into their own config.toml: binding dictated
+        # config.HARK_HOST, so this still catches the failure mode even if
+        # someone writes 0.0.0.0 into their own config.toml: binding hark
         # to all interfaces would expose the injection service to every
         # attached network, violating the "audio/text never leaves this
         # hardware" privacy premise.
@@ -126,7 +126,7 @@ class TestDictatedPlist:
         # The assertion above is only worth having if the dangerous value can
         # actually reach the plist — which is newly possible now that the bind
         # address comes from a user-editable file rather than from source.
-        monkeypatch.setattr(config, "DICTATED_HOST", "0.0.0.0")
+        monkeypatch.setattr(config, "HARK_HOST", "0.0.0.0")
         args = render_plist(DICTATED_PLIST)["ProgramArguments"]
         assert arg_after(args, "--host") == "0.0.0.0"
 
