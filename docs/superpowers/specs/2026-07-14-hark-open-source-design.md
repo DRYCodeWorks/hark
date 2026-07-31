@@ -2,6 +2,8 @@
 
 **Date:** 2026-07-14
 **Status:** IMPLEMENTED 2026-07-31. Kept as the rationale record, not as a plan.
+**Partly superseded** the same day — see [Non-goals](#non-goals), where CI and
+the native-app question were both reversed once the repo went public.
 **Supersedes naming in:** `2026-07-14-dictate-design.md` (architecture unchanged)
 
 > **What actually happened, where it differs from this document.**
@@ -206,11 +208,47 @@ tool broken has failed regardless of what the tests say.
 
 ## Non-goals
 
+> **Superseded in part, 2026-07-31 — read this before citing the list below.**
+> Two of these were reversed within hours of the repo going public, for the
+> same reason: they were scoped for a private repo with one user, and going
+> public changed who bears the cost. They are struck through rather than
+> deleted, because the original reasoning was sound for the situation it was
+> written in and the reversal is only legible next to it.
+
 - PyPI / Homebrew / any package registry.
-- CI, release automation, versioning, changelogs.
+- ~~CI, release automation, versioning, changelogs.~~ **CI landed 2026-07-31**
+  (PR #1). What changed: the Lua client suite was in the repo but wired to
+  nothing, so it only ran when someone remembered it existed; and the
+  service-label matcher is shell, where BSD and GNU `awk` disagree — a green
+  test on one is not evidence about the machine a user installs to. The
+  ubuntu + macOS matrix is load-bearing for that specific class of change, not
+  ceremony. Release automation, versioning and changelogs remain non-goals.
 - Linux or Windows support. This is macOS-only by construction (launchd,
   avfoundation, Hammerspoon, TCC).
-- Replacing Hammerspoon with a native Swift menubar app. It would be the right
-  answer for a *product*; this is not one.
+- ~~Replacing Hammerspoon with a native Swift menubar app. It would be the
+  right answer for a *product*; this is not one.~~ **Now an active direction**
+  (issue #2). What changed: installing hark *claims* `~/.hammerspoon/init.lua`,
+  which is the only config file Hammerspoon has, so anyone already using it
+  must merge by hand. Worse, Accessibility is granted to Hammerspoon — a
+  general-purpose scriptable runtime that can observe every keystroke — and its
+  config is a symlink into a git repo, so `git pull` changes what that grant
+  covers without re-prompting. A single-purpose bundle asks for the same
+  permission with far less behind it. That argument did not exist when hark had
+  one user who wrote the Lua himself.
+
+  **The prerequisite is signing, not code.** TCC grants are keyed to
+  code-signing identity, so an unsigned or ad-hoc-signed binary can have its
+  Accessibility grant silently invalidated on rebuild — the app stays listed
+  with the toggle on while the grant no longer applies. That is the same
+  silent-failure class this project has already been bitten by twice. An Apple
+  Developer ID is being acquired; the decision precedes the implementation.
 - Parakeet TDT as the ASR engine (measurably better than Whisper, but a
   dependency and a rewrite — recorded in the original spec as deferred).
+  Still deferred, and now gated on a measurement rather than taste: end-to-end
+  latency has never been taken, and it is the number that decides this.
+
+**The bounded-ambition framing above still holds.** "Here's my code, not a
+product" was never a rule against ever improving it — it was a rule against
+paying product taxes for an audience of one. The audience changed. Each
+reversal above is an argument about who now bears the cost, and anything not
+struck through stays a non-goal.
