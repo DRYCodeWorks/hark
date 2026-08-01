@@ -148,10 +148,15 @@ caller and no independent policy. The status item shows state and offers Quit on
 
 ### Login start
 
-`SMAppService.mainApp.register()` runs at first launch. Registration only schedules for
-*subsequent* logins, so first launch must also start the agent directly. Handle
-`.requiresApproval` (macOS has disabled it pending user consent) and `.notFound`/error by
-surfacing state in the menu bar and in `--doctor`, rather than assuming success.
+`SMAppService.mainApp.register()` is called by the **installer as the last step of a
+successful cutover** (Migration, step 4), never automatically at first launch. Registering
+on launch would mean a rolled-back install still starts the agent at the next login, where
+it would fight the restored Hammerspoon client.
+
+Registration only schedules for *subsequent* logins, so the installer also starts the agent
+directly for the current session. Handle `.requiresApproval` (macOS has disabled it pending
+user consent) and `.notFound`/error by surfacing state in the menu bar, in the status
+heartbeat's `login_item` field, and in `--doctor`, rather than assuming success.
 
 ### Permissions
 
@@ -412,12 +417,24 @@ so:
 - **Artifact**: a universal (arm64 + x86_64) `Hark.app`, zipped, attached to a GitHub
   release, with the tag as the version. `install-client.sh` selects the newest release
   unless pinned.
-- **Verification, before anything is moved into place**, all three and in this order:
-  `xcrun stapler validate` (the notarisation ticket is actually stapled), `spctl --assess
-  --type execute` (Gatekeeper accepts it), and `codesign --verify --deep --strict -R`
-  against an expected requirement naming the **Team ID and bundle ID**. `spctl` alone is a
-  Gatekeeper verdict, not a staple check, and notarisation alone only proves *someone*
-  signed it — the requirement string is what proves it was *you*.
+- **Verification splits across CI and the client**, because they have different tools
+  available:
+  - **In CI**, where Xcode exists: `xcrun stapler validate` confirms the notarisation
+    ticket is actually stapled to the artifact before it is published. This is the only
+    place `stapler` is used.
+  - **On the client**, using only stock macOS binaries: `spctl --assess --type execute -vv`
+    (`/usr/sbin/spctl`) and `codesign --verify --deep --strict -R` (`/usr/bin/codesign`)
+    against an expected requirement naming the **Team ID and bundle ID**.
+
+  Revision 4 called for `xcrun stapler validate` on the client. That contradicted this
+  document's own claim that the client no longer needs the Xcode command line tools —
+  `stapler` ships with Xcode, not with macOS. Since the downloaded artifact is quarantined,
+  `spctl --assess` exercises the full Gatekeeper path including notarisation, which is the
+  property that actually matters at install time; stapling is a release-time concern and
+  belongs where the toolchain already exists.
+
+  `spctl` alone is a Gatekeeper verdict and notarisation alone only proves *someone* signed
+  it — the requirement string is what proves it was *you*.
 - **Replacement**: download to a staging directory, verify, quit any running agent, replace
   atomically, then launch and confirm the status heartbeat appears with `hotkey` and
   `login_item` both healthy.
@@ -460,29 +477,52 @@ while Hammerspoon owns it — certainly not under `kEventHotKeyExclusive`. Healt
 hotkey the old client still holds is not possible, so registration is split out of the
 health check and happens after the handover:
 
-1. **Detect a hark-era install.** `~/.hammerspoon/init.lua` is a symlink whose target is a
-   `client/init.lua` carrying a hark marker comment — matching the *content*, not this
-   checkout's path, so an install still resolves after the repo moves. A real file, or a
-   symlink to something without the marker, means the user runs Hammerspoon
-   independently: do not quit it, do not offer to revoke anything, and ask before
-   proceeding.
-2. **Install and health-check the agent with the hotkey disabled.** Everything except
-   registration is verified: bundle signature, launch, permissions, status heartbeat,
-   server reachability, and key authentication.
+0. **Preserve a rollback target first.** Copy the *current, working* `client/init.lua` to
+   `~/.config/hark/legacy-client.lua` and record ownership in
+   `~/.config/hark/legacy-client.json`: that hark installed the symlink, its original
+   target path, and a checksum.
+
+   Both files are load-bearing and revision 4 had neither. `client/init.lua` becomes a
+   no-op stub in this same change, so after the upgrade the symlink's target *is* the stub
+   — "restore the symlink" would restore a client that does nothing. Rollback repoints at
+   the preserved copy instead.
+
+   The ownership record exists because content-matching the symlink target cannot survive
+   the repo moving: an absolute symlink (`install-client.sh:595`) to a moved checkout is
+   dangling, so there is no content left to match. A durable record in `~/.config/hark`
+   answers "did hark install this" without depending on the target existing.
+1. **Detect a hark-era install**, in this order: the ownership record from step 0 if
+   present; otherwise a symlink whose target carries the hark marker comment; otherwise a
+   *dangling* symlink whose recorded path matches a known hark layout. A real file, or a
+   symlink to something without the marker and without a record, means the user runs
+   Hammerspoon independently — do not quit it, do not offer to revoke anything, and ask
+   before proceeding.
+2. **Install and health-check the agent with the hotkey disabled**, and with login
+   registration **not yet performed**. Everything else is verified: bundle signature,
+   launch, permissions, status heartbeat, server reachability, and key authentication.
 3. **Quit Hammerspoon** and wait for process exit. Chord ownership cannot be queried —
    macOS exposes no way to ask WindowServer who owns a hotkey — so confirmed process exit
    is the strongest available signal. Revision 2's "confirms it no longer owns the chord"
    overstated what is possible.
-4. **Tell the running agent to register the hotkey**, and verify registration succeeded.
-5. **On failure at step 4**: restore the symlink, relaunch Hammerspoon, leave the agent
-   installed but inactive, and report what happened. The user ends with a working client
-   either way.
-6. **Only then** remove the symlink hark created, and offer to revoke **all three** grants —
-   `tccutil reset Accessibility`, `Microphone`, and `ListenEvent`, for
+4. **Tell the running agent to register the hotkey**, verify it succeeded, and only then
+   call `SMAppService.mainApp.register()`.
+5. **On failure at step 4, roll back in this order**: stop the agent, ensure
+   `SMAppService.mainApp` is **not** registered (unregister if step 4 got that far), point
+   `~/.hammerspoon/init.lua` at `~/.config/hark/legacy-client.lua`, relaunch Hammerspoon,
+   confirm it is running, then report. The user ends with a working client either way.
+
+   Deregistration is the part revision 4 missed: it left the agent "installed but inactive"
+   while registration ran unconditionally at first launch, so the agent would start at the
+   next login and fight the Hammerspoon that had just been restored. Registration is
+   therefore deliberately the *last* step of a successful cutover, not part of launch.
+6. **Only on success**, remove the symlink hark created, and offer to revoke **all three**
+   grants — `tccutil reset Accessibility`, `Microphone`, and `ListenEvent`, for
    `org.hammerspoon.Hammerspoon`. Input Monitoring is included because `README.md:266-268`
    told Fn-key users to grant it.
 7. If the user declines revocation, say plainly that the original exposure remains. The
    install proceeds; it is not silently reported as closed.
+8. `~/.config/hark/legacy-client.lua` is kept, not deleted, so a later manual rollback is
+   still possible. It is inert once the symlink is gone.
 
 Removing `client/rec.swift` while `install-client.sh:426` still compiles it would brick the
 installer mid-run, so that ordering holds too.
