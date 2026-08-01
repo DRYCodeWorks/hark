@@ -2,9 +2,14 @@
 
 Issue: [DRYCodeWorks/hark#2](https://github.com/DRYCodeWorks/hark/issues/2)
 Date: 2026-07-31
-Revision: 4. Panel rounds: 6/6 REVISE, then 5 REVISE + 1 APPROVED, then 6/6 REVISE with
-the findings down to two contradictions and a format bug. Rebased onto `8d12f7b`; all line
-numbers re-verified against that commit.
+Revision: 6. Six non-Claude reviewers, three review rounds plus three verification passes:
+6/6 REVISE → 5 REVISE + 1 APPROVED → 6/6 REVISE → 4 APPROVED + 2 REVISE → 2 REVISE →
+1 APPROVED + 1 REVISE, the last on documentation bookkeeping and one detection heuristic.
+Rebased onto `8d12f7b`; every line citation re-verified against that commit.
+
+This is a design document. It ships no code, so the artifacts it describes —
+`client/legacy/init-v1.lua`, the rewritten `install-client.sh` — do not exist yet by
+construction. The implementation plan comes next.
 
 ## Why
 
@@ -500,7 +505,12 @@ health check and happens after the handover:
    1. a `~/.config/hark/legacy-client.json` ownership record written by an **earlier** run,
       **and** whose recorded target matches the symlink's current target;
    2. otherwise, a symlink whose target carries the hark marker comment;
-   3. otherwise, a *dangling* symlink whose recorded path matches a known hark layout.
+   3. otherwise, a *dangling* symlink whose path matches a known hark layout — **a
+      heuristic, not proof.** When this is the *only* evidence, the installer must stop and
+      ask for explicit confirmation before quitting Hammerspoon, replacing the symlink, or
+      offering any TCC reset. A path that merely looks like hark's can belong to a
+      Hammerspoon config someone manages themselves, and every action gated behind this
+      detection is disruptive and not silently reversible.
 
    A real file, or a symlink without marker or record, means the user runs Hammerspoon
    independently — do not quit it, do not offer to revoke anything, and ask before
