@@ -260,23 +260,29 @@ mechanism. Resolved:
 }
 ```
 
-- HTTPS is required for every non-loopback host.
-- Plain HTTP is permitted for numeric loopback unconditionally, and for a host **only** if
-  that exact host is listed in `insecure_transport_hosts`.
-- The list exists because Tailscale already encrypts at the network layer, so HTTP over a
-  tailnet is a defensible choice — but it must be a stated one, not a silent default.
-  Requiring TLS on the hark server instead would mean provisioning certificates, which is
-  a larger change than this issue.
+- HTTPS is required for every non-loopback **hostname**, with no exceptions.
+- Plain HTTP is permitted for numeric loopback unconditionally, and for a **numeric IP
+  literal** only if that exact address is listed in `insecure_transport_hosts`.
+- The allowlist exists because Tailscale already encrypts at the network layer, so HTTP to
+  a tailnet IP is a defensible choice — but it must be a stated one, not a silent default.
+  Provisioning TLS on the hark server would be a larger change than this issue.
+- A Tailscale MagicDNS name is therefore **not** usable over HTTP. Use the tailnet IP.
 - `--doctor` reports every entry as a warning naming the assumption it encodes.
 - Userinfo (`user@host`) rejected; `install-client.sh:230` already treats it as a defect.
 - Redirects cancelled explicitly in the `URLSession` delegate — the default session follows
   them.
 - Ephemeral `URLSession`, so credentials and responses are not cached to disk.
 
-ATS: `NSAllowsLocalNetworking` plus per-host `NSExceptionDomains` entries generated for the
-allowlisted hosts. `NSAllowsLocalNetworking` permits local and IP loads broadly, so the
-runtime check in `Config` — not ATS — is the real boundary. Modern macOS treats bare IP
-addresses specially, so Phase 0 verifies the exact keys on both supported versions.
+**ATS: `NSAllowsLocalNetworking` only, and nothing per-host.** Revision 3 said the
+installer would generate per-host `NSExceptionDomains` entries. That is impossible:
+`NSExceptionDomains` lives in the signed `Info.plist`, so writing to it after download
+invalidates the CDHash and the Developer ID signature, and macOS kills the app at launch.
+
+Restricting insecure HTTP to IP literals is what makes a static plist sufficient —
+`NSAllowsLocalNetworking` exempts IP-literal loads without naming any host, so the plist
+never has to know which addresses a given user configured. The `Config` allowlist check at
+runtime, not ATS, remains the actual boundary. Phase 0 confirms the key behaves this way on
+both supported macOS versions, since bare IP handling has changed across releases.
 
 ## Configuration
 
@@ -403,25 +409,40 @@ delivery, real paste into a real window.
 - Leaving Hammerspoon's grants preserves exactly the privilege escape motivating this
   issue. Any same-UID process can later rewrite the symlink target and reload it.
 
-`install-client.sh`:
+### Staged cutover
 
-1. **Detects a hark-era install** — `~/.hammerspoon/init.lua` is a symlink into this repo.
-   If it is a real file, or points elsewhere, the user uses Hammerspoon independently: do
-   not quit it and do not offer to revoke anything.
-2. **Quits Hammerspoon** and waits for the process to exit. Chord ownership cannot be
-   queried — macOS exposes no way to ask WindowServer who owns a hotkey — so the check is
-   confirmed process exit plus successful registration by the new agent. Revision 2's
-   "confirms it no longer owns the chord" overstated what is possible.
-3. **Removes the symlink** it created. Leaving it means hark still claims Hammerspoon's only
-   config path and future repo changes still control it. A real file is never touched.
-4. **Offers to revoke all three grants** — `tccutil reset Accessibility`, `Microphone`, and
-   `ListenEvent`, all for `org.hammerspoon.Hammerspoon`. Input Monitoring is included
-   because `README.md:245-247` told Fn-key users to grant it.
-5. If the user declines revocation, says plainly that the original exposure remains. The
+Revisions 2 and 3 contained a deadlock: they required the native agent to be verified
+healthy *before* Hammerspoon is quit, while the agent cannot register the hotkey at all
+while Hammerspoon owns it — certainly not under `kEventHotKeyExclusive`. Health-checking a
+hotkey the old client still holds is not possible, so registration is split out of the
+health check and happens after the handover:
+
+1. **Detect a hark-era install.** `~/.hammerspoon/init.lua` is a symlink whose target is a
+   `client/init.lua` carrying a hark marker comment — matching the *content*, not this
+   checkout's path, so an install still resolves after the repo moves. A real file, or a
+   symlink to something without the marker, means the user runs Hammerspoon
+   independently: do not quit it, do not offer to revoke anything, and ask before
+   proceeding.
+2. **Install and health-check the agent with the hotkey disabled.** Everything except
+   registration is verified: bundle signature, launch, permissions, status heartbeat,
+   server reachability, and key authentication.
+3. **Quit Hammerspoon** and wait for process exit. Chord ownership cannot be queried —
+   macOS exposes no way to ask WindowServer who owns a hotkey — so confirmed process exit
+   is the strongest available signal. Revision 2's "confirms it no longer owns the chord"
+   overstated what is possible.
+4. **Tell the running agent to register the hotkey**, and verify registration succeeded.
+5. **On failure at step 4**: restore the symlink, relaunch Hammerspoon, leave the agent
+   installed but inactive, and report what happened. The user ends with a working client
+   either way.
+6. **Only then** remove the symlink hark created, and offer to revoke **all three** grants —
+   `tccutil reset Accessibility`, `Microphone`, and `ListenEvent`, for
+   `org.hammerspoon.Hammerspoon`. Input Monitoring is included because `README.md:245-247`
+   told Fn-key users to grant it.
+7. If the user declines revocation, say plainly that the original exposure remains. The
    install proceeds; it is not silently reported as closed.
-6. **Ordering**: the native agent must be installed, launched and verified healthy before
-   Hammerspoon is quit, so a failure leaves a working client. Removing `client/rec.swift`
-   while `install-client.sh:404` still compiles it would brick the installer mid-run.
+
+Removing `client/rec.swift` while `install-client.sh:404` still compiles it would brick the
+installer mid-run, so that ordering holds too.
 
 `client/init.lua` becomes a **silent** no-op stub, for symlinks this installer never sees.
 
