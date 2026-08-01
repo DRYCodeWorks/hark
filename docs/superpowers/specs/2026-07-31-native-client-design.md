@@ -428,10 +428,16 @@ so:
 
   Revision 4 called for `xcrun stapler validate` on the client. That contradicted this
   document's own claim that the client no longer needs the Xcode command line tools —
-  `stapler` ships with Xcode, not with macOS. Since the downloaded artifact is quarantined,
-  `spctl --assess` exercises the full Gatekeeper path including notarisation, which is the
-  property that actually matters at install time; stapling is a release-time concern and
+  `stapler` ships with Xcode, not with macOS. Stapling is a release-time property, so it
   belongs where the toolchain already exists.
+
+  **The installer must set `com.apple.quarantine` on the extracted app itself, before
+  `spctl` runs.** The argument that "the download is quarantined anyway" does not hold for
+  a scripted install: the attribute is applied by browsers and other LaunchServices-aware
+  downloaders, and a `curl` fetch followed by `ditto`/`unzip` need not preserve it. Without
+  the attribute, `spctl --assess` takes a different and weaker path, so the notarisation
+  check the client relies on would quietly not be the check it thinks it is. Set it
+  explicitly, then assess.
 
   `spctl` alone is a Gatekeeper verdict and notarisation alone only proves *someone* signed
   it — the requirement string is what proves it was *you*.
@@ -477,29 +483,39 @@ while Hammerspoon owns it — certainly not under `kEventHotKeyExclusive`. Healt
 hotkey the old client still holds is not possible, so registration is split out of the
 health check and happens after the handover:
 
-0. **Preserve a rollback target first.** Copy the *current, working* `client/init.lua` to
-   `~/.config/hark/legacy-client.lua` and record ownership in
-   `~/.config/hark/legacy-client.json`: that hark installed the symlink, its original
-   target path, and a checksum.
+0. **The rollback target ships in the repo, not copied at install time.** The last
+   functional Lua client is preserved as a versioned asset at
+   `client/legacy/init-v1.lua`, committed in the same change that stubs `client/init.lua`.
 
-   Both files are load-bearing and revision 4 had neither. `client/init.lua` becomes a
-   no-op stub in this same change, so after the upgrade the symlink's target *is* the stub
-   — "restore the symlink" would restore a client that does nothing. Rollback repoints at
-   the preserved copy instead.
+   It cannot be copied from the live file, which is the mistake revision 5 made. By the
+   time the updated installer runs, the user has already pulled, so `client/init.lua` *is*
+   the stub — and after a repo move the symlink is dangling and resolves to nothing at all.
+   The working code would survive only in git history and in Hammerspoon's memory, neither
+   of which the installer can read. A committed asset is the only source that is
+   guaranteed present and functional at install time.
 
-   The ownership record exists because content-matching the symlink target cannot survive
-   the repo moving: an absolute symlink (`install-client.sh:595`) to a moved checkout is
-   dangling, so there is no content left to match. A durable record in `~/.config/hark`
-   answers "did hark install this" without depending on the target existing.
-1. **Detect a hark-era install**, in this order: the ownership record from step 0 if
-   present; otherwise a symlink whose target carries the hark marker comment; otherwise a
-   *dangling* symlink whose recorded path matches a known hark layout. A real file, or a
-   symlink to something without the marker and without a record, means the user runs
-   Hammerspoon independently — do not quit it, do not offer to revoke anything, and ask
-   before proceeding.
-2. **Install and health-check the agent with the hotkey disabled**, and with login
-   registration **not yet performed**. Everything else is verified: bundle signature,
-   launch, permissions, status heartbeat, server reachability, and key authentication.
+   The installer copies it to `~/.config/hark/legacy-client.lua` before cutover, and
+   rollback repoints the symlink there.
+1. **Detect a hark-era install from pre-existing evidence only**, in this order:
+   1. a `~/.config/hark/legacy-client.json` ownership record written by an **earlier** run,
+      **and** whose recorded target matches the symlink's current target;
+   2. otherwise, a symlink whose target carries the hark marker comment;
+   3. otherwise, a *dangling* symlink whose recorded path matches a known hark layout.
+
+   A real file, or a symlink without marker or record, means the user runs Hammerspoon
+   independently — do not quit it, do not offer to revoke anything, and ask before
+   proceeding.
+
+   **The ownership record is written only after ownership is confirmed**, at the end of a
+   successful cutover, for the benefit of future runs. Revision 5 had step 0 write the
+   record and step 1 immediately trust it, which is circular: it would classify any
+   symlink as hark's own, including an independently managed one. It also assumed a record
+   that no existing installation can have, since this change introduces it.
+2. **Stage the rollback target and install the agent.** Copy `client/legacy/init-v1.lua`
+   to `~/.config/hark/legacy-client.lua` and confirm it is readable before anything is
+   changed. Then health-check the agent **with the hotkey disabled** and login registration
+   **not yet performed**: bundle signature, launch, permissions, status heartbeat, server
+   reachability, and key authentication.
 3. **Quit Hammerspoon** and wait for process exit. Chord ownership cannot be queried —
    macOS exposes no way to ask WindowServer who owns a hotkey — so confirmed process exit
    is the strongest available signal. Revision 2's "confirms it no longer owns the chord"
@@ -515,8 +531,10 @@ health check and happens after the handover:
    while registration ran unconditionally at first launch, so the agent would start at the
    next login and fight the Hammerspoon that had just been restored. Registration is
    therefore deliberately the *last* step of a successful cutover, not part of launch.
-6. **Only on success**, remove the symlink hark created, and offer to revoke **all three**
-   grants — `tccutil reset Accessibility`, `Microphone`, and `ListenEvent`, for
+6. **Only on success**, write the `~/.config/hark/legacy-client.json` ownership record —
+   confirmed ownership, the symlink's original target, and a checksum — for future runs to
+   read. Then remove the symlink hark created, and offer to revoke **all three** grants:
+   `tccutil reset Accessibility`, `Microphone`, and `ListenEvent`, for
    `org.hammerspoon.Hammerspoon`. Input Monitoring is included because `README.md:266-268`
    told Fn-key users to grant it.
 7. If the user declines revocation, say plainly that the original exposure remains. The
@@ -543,6 +561,10 @@ Line numbers are against `8d12f7b`. In scope for the implementation, not follow-
   and sample rate, not just sample width (`:45`).
 - **`README.md`** — architecture (`:16`), install step 1 (`:138`), the `--doctor` list
   (`:175`), "Changing the hotkey" (`:250`), two-machine setup, repo layout (`:387`).
+- **Add** `client/legacy/init-v1.lua` — a verbatim copy of the last functional Lua client,
+  committed in the **same** change that stubs `client/init.lua`. It is the rollback target
+  and must not be stubbed, linted into a stub, or "cleaned up" later; `tests/` should assert
+  it still binds a hotkey, so a future tidy-up cannot silently empty it.
 - **Retire** `client/rec.swift`, `tests/test_client_record.lua`, and
   `client/hark-config.example.lua`, replaced by a `client.json` example.
 - **`docs/superpowers/specs/2026-07-14-hark-open-source-design.md:7`** — "(architecture
