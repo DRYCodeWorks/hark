@@ -2,11 +2,13 @@
 
 Issue: [DRYCodeWorks/hark#2](https://github.com/DRYCodeWorks/hark/issues/2)
 Date: 2026-07-31
-Revision: 3. Round 1 returned 6/6 REVISE; round 2 returned 5 REVISE / 1 APPROVED.
+Revision: 4. Panel rounds: 6/6 REVISE, then 5 REVISE + 1 APPROVED, then 6/6 REVISE with
+the findings down to two contradictions and a format bug. Rebased onto `8d12f7b`; all line
+numbers re-verified against that commit.
 
 ## Why
 
-`install-client.sh:573` links `~/.hammerspoon/init.lua` to this repo's `client/init.lua`.
+`install-client.sh:595` links `~/.hammerspoon/init.lua` to this repo's `client/init.lua`.
 Hammerspoon has exactly one config file, so installing hark claims it.
 
 The permission story matters more. Accessibility is granted to Hammerspoon, not to hark:
@@ -33,7 +35,7 @@ owns the chord. The installed SDK says the opposite:
 > — `CarbonEvents.h`, `RegisterEventHotKey` discussion
 
 **Revision 1 fabricated a test claim.** It said `tests/test_audio.py` pins the wire format.
-`audio.py:44-49` validates sample width only, so a stereo or 44.1 kHz WAV is accepted today.
+`audio.py:45-49` validates sample width only, so a stereo or 44.1 kHz WAV is accepted today.
 
 **Revision 2 contradicted itself twice.** It promised a Tailscale HTTP opt-in while
 prohibiting non-loopback HTTP, with no mechanism for the opt-in; and it called an
@@ -80,7 +82,7 @@ choice, not a permission one.
 Two questions decide the mechanism. Neither should be answered by argument.
 
 1. **Does a keyboard `CGEventTap` require Input Monitoring in addition to Accessibility?**
-   `README.md:245-247` states from this project's own experience that an `hs.eventtap`
+   `README.md:266-268` states from this project's own experience that an `hs.eventtap`
    watching `flagsChanged` needs it. If that holds for keyDown/keyUp, Carbon is one grant
    and the tap is two, and the permission argument survives revision 1's bad reasoning by a
    different route. If not, the tap is free.
@@ -100,17 +102,26 @@ Two questions decide the mechanism. Neither should be answered by argument.
 If Carbon wins, `kEventHotKeyExclusive` is mandatory — migration cannot claim anything
 about chord ownership without it (see Migration).
 
-### The zero-frames question is probably a live bug
+### The zero-frames question is settled, and already fixed upstream
 
-Revision 2 framed this as unresolved. It should not be: Apple documents that capture from a
-denied device yields silence rather than failure, so `rec.swift:128`'s `framesWritten == 0`
-check most likely never fires. That would mean the shipped `rec` never exits 3,
-`init.lua:486-496`'s probe always writes `ok`, and `--doctor`'s microphone check is a
-confident false PASS today.
+Revisions 1 and 2 treated this as an open risk. It is neither open nor hypothetical:
+inferring microphone permission from a frame count does not work, because a TCC-denied
+device yields substituted silence rather than no frames. It was filed as
+[#9](https://github.com/DRYCodeWorks/hark/issues/9) and fixed in `559aafe` for the current
+Lua client, whose `rec.swift` now says so directly:
 
-Phase 0 validates the replacement implementation rather than deciding whether the premise
-holds. If confirmed, file it against the current client — it is a defect in shipped code,
-independent of this work.
+> "format negotiation succeeds under denial too. The only way to learn the answer is to
+> ask TCC for it."
+
+That commit is the reference implementation for this design's permission handling rather
+than something it has to invent: `rec.swift:65` switches on
+`AVCaptureDevice.authorizationStatus(for: .audio)`, `:78` calls `requestAccess` and pumps
+the main run loop rather than blocking on a semaphore (`requestAccess` delivers on an
+unspecified queue, so a blocked main thread can deadlock), and the zero-frame check
+survives at `:185` for its real meaning — the device delivered nothing at all.
+
+The native agent inherits all three behaviours. Phase 0 no longer has anything to decide
+here.
 
 ## Architecture
 
@@ -162,12 +173,12 @@ The wire format is **16 kHz, mono, 16-bit signed PCM, little-endian, single `dat
 stated explicitly here because `audio.py:22` documents it in a comment while enforcing only
 sample width.
 
-`/tmp/hark.wav` goes away, and with it the stale-file hazard `init.lua:357` guards against.
+`/tmp/hark.wav` goes away, and with it the stale-file hazard `init.lua:375` guards against.
 `Recorder` builds the 44-byte header itself; RIFF and `data` sizes are back-patched before
 the POST, since neither is known until release.
 
 The tap callback runs on an audio thread while key-up runs on the main queue.
-`rec.swift:112` mutates `framesWritten` from the callback while `rec.swift:128` reads it
+`rec.swift:163` mutates `framesWritten` from the callback while `rec.swift:185` reads it
 from `stop()` — unsynchronised today, and more consequential in-process. An actor or serial
 queue owns the buffer; stop waits for the tap to drain and is idempotent.
 
@@ -198,7 +209,7 @@ overlap, but a timed-out request that completes late must not paste into a newer
 turn, so responses whose sequence is not current are discarded.
 
 A 5 s starting deadline is separate from the 120 s capture cap: today's recorder arms its
-ceiling only after the first buffer (`rec.swift:167`), so a device that never delivers one
+ceiling only after the first buffer (`rec.swift:139`), so a device that never delivers one
 hangs indefinitely.
 
 ## Data flow
@@ -215,10 +226,17 @@ hangs indefinitely.
 Never Return. The clipboard is deliberately not restored.
 
 **Paste-target policy.** Transcription is asynchronous, so focus can move between release
-and response. If the frontmost application is not the one snapshotted at release, put the
-transcript on the pasteboard and report that automatic paste was withheld. Typing a
+and response. If the frontmost **application** is not the one snapshotted at release, put
+the transcript on the pasteboard and report that automatic paste was withheld. Typing a
 transcript into whatever happens to be focused later is worse than making the user press
 ⌘V.
+
+The guarantee is deliberately stated at application granularity, because that is all this
+mechanism enforces. It does **not** catch a focus move *within* an application — a
+different browser tab, or a password field in the same window. Catching that would mean
+comparing the system-wide focused accessibility element, which is a heavier check against a
+moving target. Claiming protection this does not deliver would be worse than the narrower
+promise, so the README should describe it in the same terms.
 
 **Paste failure propagates.** If the pasteboard write fails, report it and do **not**
 synthesise ⌘V — otherwise the keystroke pastes whatever was on the clipboard before.
@@ -234,10 +252,18 @@ the payload itself carries `\r` or `\n` into a terminal without bracketed paste.
 |---|---|---|
 | Response body | **1 MiB** | Before JSON decoding, as a streaming byte limit |
 | Sanitised text | **8 KiB** (UTF-8 bytes) | After decode and sanitisation |
+| Error `detail` | **2 KiB**, sanitised | Same treatment as transcript text |
 | Behaviour past either | **Reject, do not truncate** | Rejection is visible; truncation silently corrupts a transcript |
 
 The body cap must bind before decoding — a post-decode cap still lets a hostile server make
 `URLSession` buffer an unbounded response.
+
+**Every response path is bounded and sanitised, not just the 200.** The error table below
+displays the server's `detail` string on 400, 503 and the catch-all, and that string is
+just as attacker-controlled as a transcript. An unsanitised `detail` reaches an alert
+rather than the pasteboard, so it cannot be typed into a terminal — but it can still carry
+control sequences into whatever renders it, and an unbounded one is a denial of service on
+the UI. Same rule, smaller cap.
 
 Sanitisation applies the same rule as `sanitize.py`: C0/C1 controls and Unicode line
 separators replaced with a space, whitespace collapsed. The Swift and Python
@@ -246,8 +272,8 @@ sequences, U+2028/U+2029, and an oversized body.
 
 ## Transport policy
 
-The two-machine default is plaintext HTTP (`install-client.sh:503`) to what
-`README.md:214` calls "a LAN address you trust". On that path an attacker reads the audio,
+The two-machine default is plaintext HTTP (`install-client.sh:525`) to what
+`README.md:234` calls "a LAN address you trust". On that path an attacker reads the audio,
 the transcript and `X-Hark-Key`, and can forge the response the client then types.
 
 Revision 2 prohibited non-loopback HTTP while promising a Tailscale opt-in, with no
@@ -268,7 +294,7 @@ mechanism. Resolved:
   Provisioning TLS on the hark server would be a larger change than this issue.
 - A Tailscale MagicDNS name is therefore **not** usable over HTTP. Use the tailnet IP.
 - `--doctor` reports every entry as a warning naming the assumption it encodes.
-- Userinfo (`user@host`) rejected; `install-client.sh:230` already treats it as a defect.
+- Userinfo (`user@host`) rejected; `install-client.sh:241` already treats it as a defect.
 - Redirects cancelled explicitly in the `URLSession` delegate — the default session follows
   them.
 - Ephemeral `URLSession`, so credentials and responses are not cached to disk.
@@ -293,12 +319,12 @@ branch is deleted: one path, one permission contract.
   *client* the directory does not otherwise exist — the server-side `mkdir` ran on the
   other machine.
 - The key is read and **trimmed**: `config.py:129` writes `key + "\n"` and
-  `install-client.sh:427` strips it today. Raw bytes 401 every request. Embedded whitespace
+  `install-client.sh:449` strips it today. Raw bytes 401 every request. Embedded whitespace
   is rejected rather than silently trimmed.
 - `client.json` is written by a real JSON encoder and replaced atomically. The current
-  heredoc (`install-client.sh:541`) validates quotes only in the key (`:468`), so a
+  heredoc (`install-client.sh:563`) validates quotes only in the key (`:491`), so a
   hand-entered URL containing a quote produces an unparseable file.
-- `--doctor` stops passing the key in argv (`install-client.sh:291`), where any local
+- `--doctor` stops passing the key in argv (`install-client.sh:313`), where any local
   account can read it from the process table.
 
 **Known residual risk.** Any same-UID process can rewrite `client.json` and point the
@@ -338,7 +364,7 @@ exercises.
 ## Status and `--doctor`
 
 `--doctor` must not run the agent binary itself: a probe launched from the terminal tests
-the *terminal's* TCC grant, the trap `install-client.sh:183-190` already documents.
+the *terminal's* TCC grant, the trap `install-client.sh:177-184` already documents.
 
 Revision 2's "generation stamp" was not implementable — `--doctor` is bash and cannot read
 the agent's internal state. The binding must be independently observable:
@@ -346,21 +372,33 @@ the agent's internal state. The binding must be independently observable:
 ```json
 {
   "pid": 4321,
-  "process_started": "2026-07-31T14:02:11Z",
-  "written": "2026-07-31T14:31:02Z",
+  "process_started": "Fri Jul 31 14:02:11 2026",
+  "written_epoch": 1785508262,
   "bundle_version": "1.2.0",
   "microphone": "authorized",
   "accessibility": "trusted",
-  "local_network": "ok"
+  "local_network": "ok",
+  "hotkey": "registered",
+  "login_item": "enabled"
 }
 ```
 
+- `process_started` is the **verbatim output of `ps -o lstart= -p <own pid>`**, read by the
+  agent about itself at launch. An ISO-8601 timestamp cannot work here: `ps -o lstart=`
+  prints a localised, non-ISO string (`Fri Jul 31 14:02:11 2026`, with trailing padding),
+  so `--doctor` would need brittle date conversion to compare. Storing what `ps` prints
+  makes the check a trimmed string equality.
+- `written_epoch` is integer seconds, so bash compares it with `$(date +%s)` and no parsing.
 - The agent rewrites this every **30 s** and on every permission change.
-- `--doctor` confirms the PID is alive, that `ps -o lstart -p <pid>` matches
-  `process_started`, and that `written` is under **90 s** old. Anything else fails.
-- No agent running is a FAIL, not a missing check.
+- `--doctor` fails unless the PID is alive, `ps -o lstart= -p <pid>` matches
+  `process_started` after trimming, and `written_epoch` is within **90 s** of now.
+- `hotkey` and `login_item` are in the heartbeat because a fresh status file otherwise
+  proves only that a process is running with permissions. It would pass with an
+  unregistered hotkey or a login item macOS has disabled — both of which mean the product
+  does not work. `--doctor` requires both.
+- No agent running is a FAIL, not a skipped check.
 - Written atomically, temp file plus rename. Revision 1 would have let `--doctor` read
-  partial JSON, and today `install-client.sh:200-204` accepts any existing `ok` line, so a
+  partial JSON, and today `install-client.sh:204-208` accepts any existing `ok` line, so a
   stale file survives a revoked grant and reports PASS.
 
 Permissions are re-read after wake and on activation, so revocation during a long-running
@@ -374,12 +412,17 @@ so:
 - **Artifact**: a universal (arm64 + x86_64) `Hark.app`, zipped, attached to a GitHub
   release, with the tag as the version. `install-client.sh` selects the newest release
   unless pinned.
-- **Verification, before anything is moved into place**: staple check via `spctl --assess`,
-  and `codesign --verify --deep --strict -R` against an expected requirement naming the
-  **Team ID and bundle ID**. Notarisation alone only proves *someone* signed it.
+- **Verification, before anything is moved into place**, all three and in this order:
+  `xcrun stapler validate` (the notarisation ticket is actually stapled), `spctl --assess
+  --type execute` (Gatekeeper accepts it), and `codesign --verify --deep --strict -R`
+  against an expected requirement naming the **Team ID and bundle ID**. `spctl` alone is a
+  Gatekeeper verdict, not a staple check, and notarisation alone only proves *someone*
+  signed it — the requirement string is what proves it was *you*.
 - **Replacement**: download to a staging directory, verify, quit any running agent, replace
-  atomically, then launch and confirm the status heartbeat appears.
-- **Rollback**: keep the previous bundle until the new one reports healthy.
+  atomically, then launch and confirm the status heartbeat appears with `hotkey` and
+  `login_item` both healthy.
+- **Rollback**: keep the previous bundle until the new one reports healthy, and on failure
+  restore *and relaunch* it. Leaving the user with no running client is its own outage.
 - Failure at any step leaves the existing install untouched.
 
 ## Testing
@@ -405,7 +448,7 @@ delivery, real paste into a real window.
 
 - A running Hammerspoon holds the old Lua **in memory**. Replacing the symlinked file
   changes nothing until it reloads, so both clients bind ⌃⌥Space.
-  `install-client.sh:586` already documents that it does not auto-reload.
+  `install-client.sh:608` already documents that it does not auto-reload.
 - Leaving Hammerspoon's grants preserves exactly the privilege escape motivating this
   issue. Any same-UID process can later rewrite the symlink target and reload it.
 
@@ -436,39 +479,42 @@ health check and happens after the handover:
    either way.
 6. **Only then** remove the symlink hark created, and offer to revoke **all three** grants —
    `tccutil reset Accessibility`, `Microphone`, and `ListenEvent`, for
-   `org.hammerspoon.Hammerspoon`. Input Monitoring is included because `README.md:245-247`
+   `org.hammerspoon.Hammerspoon`. Input Monitoring is included because `README.md:266-268`
    told Fn-key users to grant it.
 7. If the user declines revocation, say plainly that the original exposure remains. The
    install proceeds; it is not silently reported as closed.
 
-Removing `client/rec.swift` while `install-client.sh:404` still compiles it would brick the
+Removing `client/rec.swift` while `install-client.sh:426` still compiles it would brick the
 installer mid-run, so that ordering holds too.
 
 `client/init.lua` becomes a **silent** no-op stub, for symlinks this installer never sees.
 
 ## Blast radius
 
-In scope for the implementation, not follow-ups:
+Line numbers are against `8d12f7b`. In scope for the implementation, not follow-ups:
 
-- **`install-client.sh`** — replace the Hammerspoon install, the `swiftc` build
-  (`:397-408`), the launch block (`:576-589`), and every `--doctor` check (`:86-110`,
-  `:127`, `:173`, `:192`, `:657`, `:720`).
+- **`install-client.sh`** — replace the Hammerspoon install, the `swiftc` build (`:419`),
+  the launch block (`:613`), and every `--doctor` check: `check_hammerspoon_installed`
+  (`:86`), the Lua-config key grep (`:127`), the recorder check (`:173`), the mic-status
+  read (`:196`), the Hammerspoon TCC query (`:679`), and the probe wait (`:742`).
 - **`src/hark/app.py`** (`:103-107`) and **`tests/test_app.py`** (`:107`) — branch the 400
   detail by cause.
 - **`src/hark/audio.py`** and **`tests/test_audio.py`** — enforce and assert channel count
-  and sample rate, not just sample width.
-- **`README.md`** — architecture (`:13-14`), install (`:118-135`), `--doctor` (`:155-166`),
-  hotkey editing (`:230-247`), two-machine setup, repo layout (`:365-367`).
+  and sample rate, not just sample width (`:45`).
+- **`README.md`** — architecture (`:16`), install step 1 (`:138`), the `--doctor` list
+  (`:175`), "Changing the hotkey" (`:250`), two-machine setup, repo layout (`:387`).
 - **Retire** `client/rec.swift`, `tests/test_client_record.lua`, and
   `client/hark-config.example.lua`, replaced by a `client.json` example.
-- **Mark superseded** `docs/superpowers/specs/2026-07-14-hark-open-source-design.md`:
-  - `:5` — "(architecture unchanged)", which this design invalidates.
-  - `:213-214` — replacing Hammerspoon with a native Swift menubar app listed as a
-    non-goal, with the stated reason "It would be the right answer for a *product*; this is
-    not one." That deserves an explicit answer, not silent reversal.
-  - `:210` — "CI, release automation, versioning, changelogs" listed as a non-goal. #1
-    already added CI and this design adds signed release automation.
-- Update the status line of `2026-07-14-dictate-design.md` (`:10`).
+- **`docs/superpowers/specs/2026-07-14-hark-open-source-design.md:7`** — "(architecture
+  unchanged)", which this design invalidates.
+- Update the status line of `2026-07-14-dictate-design.md` (`:10`), still "Design approved,
+  pending implementation plan".
+
+**Already done upstream, and deliberately not repeated here.** `ef47aeb` struck the two
+non-goals this design contradicts — "CI, release automation, versioning, changelogs"
+(`:219`) and "Replacing Hammerspoon with a native Swift menubar app" (`:228`) — and added a
+"Superseded in part" header at `:211`. `c852392` cleared the stale `setup.sh` references
+(#8's sibling work). Only `:7` above remains.
 
 ## Non-goals
 
@@ -479,10 +525,27 @@ In scope for the implementation, not follow-ups:
 - TLS on the hark server. The `insecure_transport_hosts` allowlist is the interim answer.
 - Keychain-pinned server origin. Follow-up, recorded above.
 
+## Clipboard retention
+
+Two reviewers asked for this to be decided rather than left open, and they are right: it is
+a privacy policy, not a preference.
+
+**The transcript self-clears after 90 seconds, but only if `NSPasteboard.changeCount` is
+unchanged since hark wrote it.**
+
+The existing behaviour — set and never restore — is deliberate and stays: a misfired paste
+stays recoverable with a manual ⌘V instead of re-speaking. See the comment above
+`hs.pasteboard.setContents` in `client/init.lua`. But "never restore" currently means
+*indefinitely*, and any local process can poll `NSPasteboard` and harvest every transcript
+without holding a single TCC grant. That is a real exposure the design was silently
+inheriting.
+
+90 seconds keeps the recovery window that motivated the original decision while bounding
+the exposure. The `changeCount` guard means hark only ever clears its own value — if you
+copied something else in the meantime, hark does nothing.
+
+The README should state this as a privacy property, not only as paste-recovery ergonomics.
+
 ## Open questions
 
 - Phase 0's two answers, which decide the hotkey mechanism.
-- Whether the clipboard should self-clear after a timeout when `changeCount` is unchanged.
-  Any local process can poll `NSPasteboard` and harvest every transcript without holding
-  any TCC grant. Revision 1 documented non-restoration purely as a usability choice; it is
-  also a privacy exposure, and the README should say so either way.
