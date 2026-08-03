@@ -15,6 +15,7 @@ public enum AgentState { case idle, starting, recording, stopping, uploading }
 
 public final class AgentController: NSObject {
     private let config: HarkConfig
+    private let clientConfig: ClientConfig
     private let hotkey = Hotkey()
     private let recorder = Recorder()
     private var dictate: DictateClient
@@ -31,8 +32,24 @@ public final class AgentController: NSObject {
     public init(config: HarkConfig) {
         self.config = config
         self.log = Log()
-        let url = URL(string: "http://127.0.0.1:\(config.harkPort)/dictate")!
-        self.dictate = DictateClient(url: url, key: KeyFile.load() ?? "")
+
+        // Client addressing is NOT the server's deployment config. A recording
+        // Mac has no server, no key file and nothing on loopback; and a server
+        // bound to a tailnet address is unreachable at 127.0.0.1 even on the
+        // machine running it. See ClientConfig.
+        let client: ClientConfig
+        do {
+            client = try ClientConfig.load(defaultPort: config.harkPort)
+        } catch {
+            // Fatal on purpose. Continuing would build a client pointed at
+            // loopback that fails on every utterance with a connection error,
+            // which reads as "the server is down" rather than "your config is
+            // wrong" — and that misdirection is expensive.
+            FileHandle.standardError.write("hark: \(error)\n".data(using: .utf8)!)
+            exit(2)
+        }
+        self.clientConfig = client
+        self.dictate = DictateClient(url: client.serverURL, key: client.key)
         super.init()
     }
 
@@ -161,14 +178,36 @@ public final class AgentController: NSObject {
     }
 
     private func paste() {
+        // Re-checked here, not just at startup: the grant can be revoked, or
+        // silently invalidated by a rebuild, while the process keeps running,
+        // and this is the moment it matters. Without it every step above still
+        // reports success — the pasteboard write, the log line — and an
+        // untrusted process is indistinguishable from a dropped event.
+        guard accessibilityTrusted() else {
+            alert("hark: Accessibility is not granted, so the transcript cannot be pasted. "
+                + "It IS on the clipboard — press ⌘V. "
+                + "System Settings -> Privacy & Security -> Accessibility -> turn ON hark.")
+            return
+        }
+
         // Synthesise ⌘V. NEVER Return/Enter — auto-submit is a hard non-goal.
         let source = CGEventSource(stateID: .hidSystemState)
         let down = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true) // kVK_ANSI_V
         down?.flags = .maskCommand
         down?.post(tap: .cghidEventTap)
-        let up = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false)
-        up?.flags = .maskCommand
-        up?.post(tap: .cghidEventTap)
+
+        // HOLD THE KEY. Posting key-up immediately after key-down is a
+        // zero-duration keystroke, which some apps silently drop — the events
+        // arrive, nothing acts on them, and the transcript never appears.
+        // hs.eventtap.keyStroke, the implementation being replaced, holds for
+        // 200 ms (`local keyDelay = 200000`, then usleep between down and up);
+        // the tap and the flags are otherwise identical. Async rather than a
+        // sleep so the run loop is not stalled behind it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            let up = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false)
+            up?.flags = .maskCommand
+            up?.post(tap: .cghidEventTap)
+        }
     }
 
     private func clearIfOwned() {
@@ -222,7 +261,7 @@ public final class AgentController: NSObject {
         return ""
     }
 
-    private var dictateServer: String { "http://127.0.0.1:\(config.harkPort)/dictate" }
+    private var dictateServer: String { clientConfig.serverURL.absoluteString }
 
     // MARK: - Permissions
 
@@ -239,7 +278,22 @@ public final class AgentController: NSObject {
     private func probePermissions() {
         // Raise the microphone dialog if never asked.
         if microphoneStatus() == .notDetermined {
-            AVCaptureDevice.requestAccess(for: .audio) { _ in }
+            // Wait for the answer rather than discarding it. The completion is
+            // delivered on an unspecified queue, so this pumps the run loop
+            // instead of blocking on a semaphore, which would deadlock if that
+            // queue turned out to be main. Continuing without the answer means
+            // recording the substituted silence macOS hands an ungranted
+            // process — full-length buffers of zeros, indistinguishable from a
+            // quiet room until you check the peak.
+            var granted: Bool?
+            AVCaptureDevice.requestAccess(for: .audio) { granted = $0 }
+            let deadline = Date(timeIntervalSinceNow: 60)
+            while granted == nil, Date() < deadline {
+                RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+            }
+            if granted != true {
+                log.info("microphone access was not granted")
+            }
         }
         // AXIsProcessTrusted alone checks but never prompts; use the option.
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
