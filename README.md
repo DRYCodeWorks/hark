@@ -114,16 +114,20 @@ re-renders and reloads.
 
 `./install-server.sh --doctor` re-runs the checks alone, read-only.
 
-The plists are **rendered from templates** in `launchd/`, never edited by
-hand, because launchd reads its own XML and cannot see `config.py` — so the
-two drift silently. `tests/test_launchd_config_sync.py` renders the templates
-and asserts they agree with config, including that the ASR server is never
-bound off loopback.
+The plists are **rendered by `install-server.sh`**, never edited by hand.
+`tests/test_install_server_doctor.py` renders them against a fabricated config
+and asserts they agree with it — including that the ASR server is never bound
+off loopback.
 
-A wildcard bind is refused by `hark.plists` itself, not only by the test
-suite — `install-server.sh` stops rather than installing a plist that listens
-on every interface. Any other address is accepted, since the two-machine setup
-binds to a private one on purpose.
+The server's own plist carries **no address at all**: `hark serve` reads
+`~/.config/hark/config.toml` directly, so there is one copy of that fact rather
+than two that can disagree. (`uvicorn` needed `--host` baked into the plist,
+which is what the old drift guard existed to police.)
+
+A wildcard bind is refused twice: by `install-server.sh` before a plist is
+written, and by `hark serve` at startup. The second is the real enforcement;
+the first is what turns a launchd crash-loop into a message. Any other address
+is accepted, since the two-machine setup binds to a private one on purpose.
 
 The shared secret lives at `~/.config/hark/key` (mode 600), outside the repo.
 
@@ -441,13 +445,11 @@ install-server.sh          transcription side: deps, model, plists, services
 install-client.sh          builds + installs the agent, plus --doctor
 swift/
   Sources/hark/            the agent — hotkey, capture, paste, overlay
-  Sources/HarkCore/        config, client, WAV, sanitise, server
+  Sources/HarkCore/        config, client, WAV, sanitise, the HTTP server
   Packaging/build-app.sh   assembles and signs Hark.app
   Tests/                   SwiftPM suite (48)
 config.example.toml        shape of ~/.config/hark/config.toml
-src/hark/                  the Python HTTP service (still the one in use)
-launchd/                   plist templates, rendered by hark.plists
-tests/                     pytest suite
+tests/                     pytest suite — drives the installers as subprocesses
 .github/workflows/ci.yml   pytest + shellcheck + the signed bundle build
 docs/                      design specs
 ```

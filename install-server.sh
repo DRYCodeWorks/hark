@@ -26,17 +26,30 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="$HOME/.config/hark"
+CONFIG_FILE="$CONFIG_DIR/config.toml"
 KEY_FILE="$CONFIG_DIR/key"
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 LABELS=(com.drycodeworks.hark com.drycodeworks.hark-whisper)
 
-# Where the running service lives, kept in step with hark.plists.VENV_DIR —
-# tests/test_launchd_config_sync.py asserts the plists point here. The clone is
+# Where the running service lives. The clone is
 # a place to edit code; a daemon that runs out of it breaks when the checkout
 # moves and silently changes behaviour on `git pull`.
-INSTALL_DIR="$HOME/.local/share/hark"
-VENV_DIR="$INSTALL_DIR/venv"
-VENV_PYTHON="$VENV_DIR/bin/python"
+APP_DIR="$HOME/Applications"
+APP_DST="$APP_DIR/Hark.app"
+
+# Minimal TOML reader for the three scalars the plists need. Deliberately not a
+# parser: config.toml is two tables of scalars, and `hark serve` is the thing
+# that actually validates it.
+config_value() {
+  local table="$1" key="$2" default="$3"
+  [[ -f "$CONFIG_FILE" ]] || { printf '%s' "$default"; return; }
+  awk -v t="[$table]" -v k="$key" '
+    $0 ~ /^\[/ { in_t = ($0 == t); next }
+    in_t && $0 ~ "^[[:space:]]*" k "[[:space:]]*=" {
+      sub(/^[^=]*=[[:space:]]*/, ""); gsub(/"/, ""); sub(/[[:space:]]*(#.*)?$/, "");
+      print; exit
+    }' "$CONFIG_FILE" | head -1 | grep . || printf '%s' "$default"
+}
 
 MODEL_DIR="$HOME/.local/share/whisper-cpp"
 MODEL_NAME="ggml-large-v3-turbo.bin"
@@ -79,31 +92,36 @@ doctor_fail() {
 # Asked of the INSTALLED package, not the clone: the installed one is what
 # launchd is running, and if the two have drifted then the clone's answer is
 # the wrong one to probe with.
+# Probed over LOOPBACK, not over the configured bind address.
+#
+# The server accepts loopback by design — a client on this machine is the same
+# trust boundary whichever address it dials — and on a tailnet bind the server's
+# own machine cannot reach itself at that address anyway. Probing the bind
+# address from here reported the service as down while it was serving the other
+# machine perfectly.
 hark_url() {
-  "$VENV_PYTHON" -c \
-    'from hark import config; print(f"http://{config.HARK_HOST}:{config.HARK_PORT}")'
+  printf 'http://127.0.0.1:%s' "$(config_value server port 8911)"
 }
 
 # ==============================================================================
 # Checks
 # ==============================================================================
 
-# The plists name an absolute path inside VENV_DIR. If that venv is missing or
-# broken, launchd's only account of it is a restart loop and a spawn error in
-# /tmp/hark.err — so check it here, first, where the message can say what to do.
+# The plist names an absolute path inside the bundle. If it is missing or its
+# signature is broken, launchd's only account is a restart loop and a spawn
+# error in /tmp/hark.err — so check it here, where the message can say what to do.
 check_server_installed() {
-  if [[ ! -x "$VENV_DIR/bin/uvicorn" ]]; then
-    doctor_fail "the server is installed at ${VENV_DIR}" \
-      "re-run ./install-server.sh (it installs the package there; launchd runs that copy, not this clone)"
+  if [[ ! -x "$APP_DST/Contents/MacOS/hark" ]]; then
+    doctor_fail "the server is installed at ${APP_DST}" \
+      "re-run ./install-server.sh (launchd runs that bundle, not this clone)"
     return 1
   fi
-  if ! "$VENV_PYTHON" -c 'import hark' >/dev/null 2>&1; then
-    doctor_fail "the server is installed at ${VENV_DIR}" \
-      "the venv exists but cannot import hark — re-run ./install-server.sh"
+  if ! codesign --verify --strict "$APP_DST" 2>/dev/null; then
+    doctor_fail "the server bundle's signature verifies" \
+      "rebuild it: ./install-server.sh"
     return 1
   fi
-  doctor_pass "the server is installed at ${VENV_DIR}"
-  return 0
+  doctor_pass "the server is installed at ${APP_DST}"
 }
 
 check_model() {
@@ -223,6 +241,75 @@ run_doctor() {
 
 # Sourcing this file defines the check_* functions and stops here, so the test
 # suite can exercise them without running an install. Everything below this
+render_plists() {
+  log "Rendering launchd plists from config..."
+  mkdir -p "$LAUNCH_AGENTS"
+  
+  BIND="$(config_value server bind 127.0.0.1)"
+  # Refused here as well as in `hark serve`. The server exits with an
+  # explanation, but launchd answers that with a crash loop, so catching it at
+  # render is the difference between a message and a restart storm.
+  case "$(printf '%s' "$BIND" | tr -d '[:space:]')" in
+    0.0.0.0|::|"")
+      err "server.bind is \"${BIND}\", which listens on every network interface."
+      err "hark's response is pasted into whatever has focus, so this lets anyone"
+      err "who can reach this machine choose what gets typed."
+      err "Use 127.0.0.1, or this machine's private (tailnet/VPN/LAN) address."
+      return 1
+      ;;
+  esac
+  PORT="$(config_value server port 8911)"
+  WHISPER_PORT="$(config_value whisper port 8910)"
+  WHISPER_BIN="$(command -v whisper-server || echo /opt/homebrew/bin/whisper-server)"
+  
+  cat > "$LAUNCH_AGENTS/com.drycodeworks.hark.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>com.drycodeworks.hark</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>${APP_DST}/Contents/MacOS/hark</string>
+		<string>serve</string>
+	</array>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><true/>
+	<key>StandardOutPath</key><string>/tmp/hark.log</string>
+	<key>StandardErrorPath</key><string>/tmp/hark.err</string>
+</dict>
+</plist>
+PLIST
+  
+  cat > "$LAUNCH_AGENTS/com.drycodeworks.hark-whisper.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>com.drycodeworks.hark-whisper</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>${WHISPER_BIN}</string>
+		<string>--model</string>
+		<string>${MODEL_PATH}</string>
+		<string>--host</string>
+		<string>127.0.0.1</string>
+		<string>--port</string>
+		<string>${WHISPER_PORT}</string>
+		<string>--language</string>
+		<string>en</string>
+	</array>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><true/>
+	<key>StandardOutPath</key><string>/tmp/hark-whisper.log</string>
+	<key>StandardErrorPath</key><string>/tmp/hark-whisper.err</string>
+</dict>
+</plist>
+PLIST
+  
+  log "Rendered both plists (hark: ${BIND}:${PORT}, whisper: 127.0.0.1:${WHISPER_PORT})"
+}
+
 # line only runs when the script is executed directly.
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
@@ -282,25 +369,38 @@ else
   log "Model saved to ${MODEL_PATH}"
 fi
 
-# --- 3. Install the server -----------------------------------------------------
+# --- 3. Build and install the server ------------------------------------------
 
-# launchd runs THIS copy, not the clone. Rebuilt from scratch on every run so a
-# dependency dropped from pyproject.toml actually leaves, rather than lingering
-# in the installed environment and hiding a missing declaration until someone
-# installs fresh. It is a few seconds and a 26 MB directory.
-log "Installing the server into ${VENV_DIR}..."
-mkdir -p "$INSTALL_DIR"
-rm -rf "$VENV_DIR"
-uv venv --quiet "$VENV_DIR"
-uv pip install --quiet --python "$VENV_PYTHON" "$REPO_DIR"
-
-# Prove it before a plist points launchd at it: a venv that cannot import hark
-# would otherwise surface as a restart loop with a traceback in /tmp/hark.err.
-if ! "$VENV_PYTHON" -c 'import hark' >/dev/null 2>&1; then
-  err "installed ${VENV_DIR} but it cannot import hark — aborting."
+# One signed bundle, two roles: `hark serve` here, `hark agent` on whatever Mac
+# you dictate from. install-client.sh installs the same artifact, so a
+# single-machine setup ends up with one copy that plays both parts.
+if ! command -v swift >/dev/null 2>&1; then
+  err "swift not found. Install the Xcode command line tools: xcode-select --install"
   exit 1
 fi
-log "Installed. The clone is now only needed to re-install."
+
+log "Building the server..."
+(cd "$REPO_DIR/swift" && swift build -c release >/dev/null && bash Packaging/build-app.sh >/dev/null)
+
+log "Installing to ${APP_DST}..."
+mkdir -p "$APP_DIR"
+# Replaced wholesale: a stale file left inside the bundle invalidates the
+# signature, and that surfaces much later as an unexplained TCC re-prompt.
+rm -rf "$APP_DST"
+cp -R "$REPO_DIR/swift/Packaging/Hark.app" "$APP_DST"
+
+# Prove it runs before a plist points launchd at it. A binary that cannot
+# start would otherwise surface as a restart loop with nothing in the log.
+# Captured, not piped: `hark` with no arguments prints usage and exits 2 —
+# correct behaviour — and under `set -o pipefail` that makes the pipeline fail
+# no matter what grep says, so the check condemned a working binary.
+usage_out="$("$APP_DST/Contents/MacOS/hark" 2>&1 || true)"
+if [[ "$usage_out" != *"usage: hark"* ]]; then
+  err "installed ${APP_DST} but the binary does not run — aborting."
+  err "got: ${usage_out}"
+  exit 1
+fi
+log "Installed."
 
 # --- 4. Shared secret ---------------------------------------------------------
 
@@ -309,24 +409,20 @@ chmod 700 "$CONFIG_DIR"
 if [[ -s "$KEY_FILE" ]]; then
   log "Shared secret already exists (${KEY_FILE}) — leaving it alone."
 else
-  # Generated by config.hark_key() rather than here, so there is exactly one
-  # implementation of how the key is created and persisted. Regenerating a
-  # key that already exists would silently 401 every configured client.
-  log "Generating the shared secret..."
-  # Run from the INSTALLED package: the key the server will read must be
-  # written by the same code that will read it.
-  "$VENV_PYTHON" -c 'from hark import config; config.hark_key()'
-  log "Wrote ${KEY_FILE}"
+  # Created by the server on first use (KeyFile.ensure), not here, so there is
+  # exactly one implementation of how the key is generated and persisted.
+  # Regenerating a key that already exists would silently 401 every configured
+  # client, which is why this branch only reports.
+  log "No shared secret yet — the server will create ${KEY_FILE} on first start."
 fi
 
 # --- 5. Render the plists -----------------------------------------------------
+#
+# Rendered here rather than by a Python module, so the server has no Python at
+# all. The wildcard-bind check is enforced by `hark serve` itself at startup —
+# it refuses 0.0.0.0 with an explanation — so this does not re-implement it.
 
-log "Rendering launchd plists from config..."
-mkdir -p "$LAUNCH_AGENTS"
-# From the CLONE, not the installed venv: the templates live in launchd/ and
-# are not shipped in the wheel. Rendering is an install-time task, and this
-# script is part of the checkout that has them.
-(cd "$REPO_DIR" && uv run --quiet python -m hark.plists >/dev/null)
+render_plists
 
 # --- 6. Load the services -----------------------------------------------------
 
