@@ -1,0 +1,327 @@
+"""Guard install-agent.sh and the agent bundle's metadata.
+
+The agent's failure modes are almost all silent. A missing Info.plist key
+kills the process the moment it opens the microphone; a wrong bundle
+identifier orphans every TCC grant with the toggle still showing ON; a doctor
+that reports a denied microphone as PASS sends the user looking somewhere
+else entirely. None of those announce themselves, so they get asserted here.
+
+The scripted checks are exercised by sourcing install-agent.sh, which stops at
+its source guard with every function defined and nothing installed.
+"""
+
+import plistlib
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parent.parent
+SCRIPT = REPO / "install-agent.sh"
+INFO_PLIST = REPO / "client" / "agent" / "Info.plist"
+AGENT_SWIFT = REPO / "client" / "agent" / "hark-agent.swift"
+BUILD_SCRIPT = REPO / "client" / "agent" / "build-agent.sh"
+
+BUNDLE_ID = "com.drycodeworks.hark-agent"
+
+# doctor_pass/doctor_fail colour their markers unconditionally.
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+macos_only = pytest.mark.skipif(
+    sys.platform != "darwin", reason="uses BSD stat / macOS-only tooling"
+)
+
+
+def run_sourced(body: str, env_overrides: dict[str, str] | None = None) -> tuple[int, str]:
+    """Source install-agent.sh, then run `body` with its functions available."""
+    script = f'set -uo pipefail\nsource "{SCRIPT}"\n{body}\n'
+    proc = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={**dict(__import__("os").environ), **(env_overrides or {})},
+    )
+    return proc.returncode, _ANSI.sub("", proc.stdout + proc.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Sourcing must not install anything
+# ---------------------------------------------------------------------------
+
+
+def test_sourcing_the_script_installs_nothing(tmp_path):
+    rc, out = run_sourced("echo SOURCED", {"HOME": str(tmp_path)})
+    assert rc == 0, out
+    assert "SOURCED" in out
+    assert not (tmp_path / "Applications").exists()
+    assert not (tmp_path / "Library" / "LaunchAgents").exists()
+    assert not (tmp_path / ".config").exists()
+
+
+# ---------------------------------------------------------------------------
+# Info.plist — the keys whose absence is fatal and silent
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def plist():
+    return plistlib.loads(INFO_PLIST.read_bytes())
+
+
+@pytest.fixture(scope="module")
+def source():
+    return AGENT_SWIFT.read_text()
+
+
+class TestInfoPlist:
+    def test_declares_a_microphone_usage_description(self, plist):
+        # Without this key macOS does not show an empty prompt - it kills the
+        # process outright the moment it touches the device.
+        assert plist["NSMicrophoneUsageDescription"].strip()
+
+    def test_the_usage_description_explains_the_ask(self, plist):
+        # This string IS the consent dialog. A placeholder here is a real
+        # defect, not a cosmetic one.
+        text = plist["NSMicrophoneUsageDescription"].lower()
+        assert "hark" in text
+        assert any(word in text for word in ("dictat", "voice", "transcri"))
+
+    def test_is_a_background_agent(self, plist):
+        # A Dock icon for a process with no clickable window is noise, and
+        # .regular activation would let the overlay steal focus.
+        assert plist["LSUIElement"] is True
+
+    def test_bundle_identifier_is_the_one_tcc_will_key_grants_to(self, plist):
+        assert plist["CFBundleIdentifier"] == BUNDLE_ID
+
+    def test_bundle_id_does_not_collide_with_the_server_launchd_label(self, plist):
+        # The server's label is com.drycodeworks.hark. Different namespaces, so
+        # this is about keeping `launchctl list | grep` unambiguous.
+        assert plist["CFBundleIdentifier"] != "com.drycodeworks.hark"
+
+    def test_executable_name_matches_what_the_build_produces(self, plist):
+        assert plist["CFBundleExecutable"] == "hark-agent"
+        assert f'MacOS/{plist["CFBundleExecutable"]}' in BUILD_SCRIPT.read_text()
+
+
+def test_launchagent_label_matches_the_bundle_id():
+    # Not required by macOS, but a mismatch makes every diagnostic ambiguous -
+    # and check_accessibility below looks the client up in TCC.db BY this
+    # string, where the value that matters is the bundle id.
+    assert f'AGENT_LABEL="{BUNDLE_ID}"' in SCRIPT.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Config: JSON the Swift side can actually decode
+# ---------------------------------------------------------------------------
+
+
+class TestClientConfig:
+    def test_written_config_is_valid_json_with_both_fields(self, tmp_path):
+        import json
+
+        rc, out = run_sourced(
+            'write_client_config "http://example:8911/dictate" "s3cr3t"',
+            {"HOME": str(tmp_path)},
+        )
+        assert rc == 0, out
+        written = json.loads((tmp_path / ".config/hark/client.json").read_text())
+        assert written == {"server": "http://example:8911/dictate", "key": "s3cr3t"}
+
+    @macos_only
+    def test_written_config_is_600_because_it_holds_a_secret(self, tmp_path):
+        rc, out = run_sourced(
+            'write_client_config "http://x/dictate" "k"', {"HOME": str(tmp_path)}
+        )
+        assert rc == 0, out
+        mode = (tmp_path / ".config/hark/client.json").stat().st_mode & 0o777
+        assert mode == 0o600
+
+    def test_a_key_containing_quotes_does_not_produce_broken_json(self, tmp_path):
+        # Keys are base64-ish today, so this is a guard rather than a fix for
+        # something observed. Broken JSON here is silent: the agent alerts
+        # "not valid JSON" and the hotkey does nothing.
+        import json
+
+        rc, out = run_sourced(
+            r"""write_client_config 'http://x/dictate' 'a"b\c' """,
+            {"HOME": str(tmp_path)},
+        )
+        assert rc == 0, out
+        written = json.loads((tmp_path / ".config/hark/client.json").read_text())
+        assert written["key"] == r'a"b\c'
+
+    def test_json_field_round_trips_what_write_client_config_wrote(self, tmp_path):
+        rc, out = run_sourced(
+            'write_client_config "http://rt:8911/dictate" "rtkey"\n'
+            "json_field server\necho\njson_field key",
+            {"HOME": str(tmp_path)},
+        )
+        assert rc == 0, out
+        assert "http://rt:8911/dictate" in out
+        assert "rtkey" in out
+
+
+class TestLegacyMigration:
+    def _legacy(self, home: Path, server: str, key: str) -> None:
+        d = home / ".hammerspoon"
+        d.mkdir(parents=True)
+        (d / "hark-config.lua").write_text(
+            f'return {{\n  server = "{server}",\n  key = "{key}",\n}}\n'
+        )
+
+    def test_reads_the_hammerspoon_config_shape(self, tmp_path):
+        self._legacy(tmp_path, "http://old:8911/dictate", "oldkey")
+        rc, out = run_sourced("legacy_field server\necho\nlegacy_field key", {"HOME": str(tmp_path)})
+        assert rc == 0, out
+        assert "http://old:8911/dictate" in out
+        assert "oldkey" in out
+
+    def test_migration_never_modifies_the_hammerspoon_config(self, tmp_path):
+        # Rolling back must stay as cheap as relaunching Hammerspoon.
+        self._legacy(tmp_path, "http://old:8911/dictate", "oldkey")
+        legacy = tmp_path / ".hammerspoon" / "hark-config.lua"
+        before = legacy.read_bytes()
+        rc, out = run_sourced("resolve_config", {"HOME": str(tmp_path)})
+        assert rc == 0, out
+        assert legacy.read_bytes() == before
+
+    def test_an_existing_client_json_wins_over_the_legacy_config(self, tmp_path):
+        import json
+
+        self._legacy(tmp_path, "http://old:8911/dictate", "oldkey")
+        rc, _ = run_sourced(
+            'write_client_config "http://new:8911/dictate" "newkey"', {"HOME": str(tmp_path)}
+        )
+        assert rc == 0
+        rc, out = run_sourced("resolve_config", {"HOME": str(tmp_path)})
+        assert rc == 0, out
+        written = json.loads((tmp_path / ".config/hark/client.json").read_text())
+        assert written["key"] == "newkey", "a re-run clobbered a hand-edited config"
+
+    def test_falls_back_to_the_local_server_key(self, tmp_path):
+        import json
+
+        d = tmp_path / ".config/hark"
+        d.mkdir(parents=True)
+        (d / "key").write_text("localkey\n")
+        rc, out = run_sourced("resolve_config", {"HOME": str(tmp_path)})
+        assert rc == 0, out
+        written = json.loads((d / "client.json").read_text())
+        # Trailing newline stripped, or the header goes out with one in it.
+        assert written["key"] == "localkey"
+
+    def test_no_key_anywhere_fails_loudly_rather_than_writing_an_empty_key(self, tmp_path):
+        rc, out = run_sourced("resolve_config", {"HOME": str(tmp_path)})
+        assert rc != 0
+        assert "no shared secret" in out
+        assert not (tmp_path / ".config/hark/client.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Doctor: no false PASSes
+# ---------------------------------------------------------------------------
+
+
+class TestMicDoctor:
+    def _status(self, home: Path, body: str) -> None:
+        d = home / ".config/hark"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "agent-mic-status").write_text(body)
+
+    def test_ok_passes(self, tmp_path):
+        self._status(tmp_path, "ok\n2026-08-03 12:00:00\n")
+        rc, out = run_sourced("check_mic", {"HOME": str(tmp_path)})
+        assert rc == 0, out
+        assert "PASS" in out
+
+    def test_denied_is_not_a_pass(self, tmp_path):
+        self._status(tmp_path, "denied\n2026-08-03 12:00:00\nrec exited 3.\n")
+        rc, out = run_sourced("check_mic", {"HOME": str(tmp_path)})
+        assert "FAIL" in out
+        assert "Microphone" in out
+
+    def test_error_is_not_a_pass_and_surfaces_the_detail(self, tmp_path):
+        self._status(tmp_path, "error\n2026-08-03 12:00:00\nrec exited 5. no audio\n")
+        rc, out = run_sourced("check_mic", {"HOME": str(tmp_path)})
+        assert "FAIL" in out
+        assert "no audio" in out
+
+    def test_a_missing_status_file_is_not_a_pass(self, tmp_path):
+        rc, out = run_sourced("check_mic", {"HOME": str(tmp_path)})
+        assert "FAIL" in out
+        assert "PASS" not in out
+
+
+def test_agent_loaded_survives_the_pipefail_sigpipe_trap(tmp_path):
+    """`launchctl list | grep -q X` under pipefail reports everything unloaded.
+
+    grep exits at the first match, launchctl takes SIGPIPE, and pipefail
+    propagates it - so the check reports every service as not-loaded while
+    they are all running. This bit install-server.sh once already (156bb69).
+    The fix is to capture into a variable first, which is what is asserted
+    here: a stub launchctl emitting many lines must still be detected.
+    """
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "launchctl").write_text(
+        "#!/bin/sh\n"
+        "echo 'PID\tStatus\tLabel'\n"
+        f"echo '1\t0\t{BUNDLE_ID}'\n"
+        + "".join(f"echo '{n}\t0\tcom.example.filler{n}'\n" for n in range(2, 400))
+    )
+    (stub / "launchctl").chmod(0o755)
+
+    import os
+
+    rc, out = run_sourced(
+        "agent_loaded && echo DETECTED || echo MISSED",
+        {"HOME": str(tmp_path), "PATH": f"{stub}:{os.environ['PATH']}"},
+    )
+    assert "DETECTED" in out, out
+
+
+# ---------------------------------------------------------------------------
+# The agent's own invariants, asserted against its source
+# ---------------------------------------------------------------------------
+
+
+class TestAgentSource:
+    def test_never_presses_return_after_pasting(self, source):
+        # Auto-submit is a hard non-goal: the user reviews the transcript
+        # before sending it. kVK_Return appearing here at all is the defect.
+        assert "kVK_Return" not in source
+        assert "kVK_ANSI_KeypadEnter" not in source
+
+    def test_does_not_save_and_restore_the_clipboard(self, source):
+        # Leaving the transcript on the clipboard makes a misfired paste
+        # recoverable with a manual Cmd+V. See the comment in paste().
+        assert "pasteboardItems" not in source
+        assert "restoreClipboard" not in source
+
+    def test_uses_a_wav_path_the_hammerspoon_client_cannot_collide_with(self, source):
+        # Both clients are installed at once during a migration. Sharing
+        # /tmp/hark.wav would let one read the other's recording.
+        assert '"/tmp/hark-agent.wav"' in source
+        assert '"/tmp/hark.wav"' not in source
+
+    def test_logs_transcript_length_but_never_content(self, source):
+        assert "text.count) chars" in source
+
+    def test_sends_the_key_as_the_hark_header(self, source):
+        assert '"X-Hark-Key"' in source
+        assert '"audio/wav"' in source
+
+    def test_registers_both_press_and_release(self, source):
+        # A hold-to-talk hotkey that only handles kEventHotKeyPressed records
+        # forever. Both kinds must be in the event spec AND handled.
+        assert "kEventHotKeyPressed" in source
+        assert "kEventHotKeyReleased" in source
+
+    def test_treats_rec_exit_3_as_a_permission_denial(self, source):
+        # rec reserves exit 3 for "TCC said no". Inferring denial from an
+        # empty capture cannot work - an ungranted process still receives
+        # full-length buffers of zeros (issue #9).
+        assert "terminationStatus == 3" in source

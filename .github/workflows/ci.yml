@@ -59,4 +59,26 @@ jobs:
 
       # Preinstalled on the Ubuntu runner image.
       - name: shellcheck
-        run: shellcheck install-server.sh install-client.sh
+        run: |
+          shellcheck install-server.sh install-client.sh install-agent.sh \
+                     client/agent/build-agent.sh
+
+  # The agent is macOS-only and needs a real Swift toolchain, so this cannot
+  # join the portable matrix above. It builds the bundle and asserts the
+  # signature verifies - an unsigned or broken-signature bundle is exactly the
+  # state in which TCC grants stop surviving a rebuild.
+  agent:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build hark.app
+        run: ./client/agent/build-agent.sh
+
+      - name: Verify the bundle signature
+        run: codesign --verify --strict --verbose=2 build/hark.app
+
+      - name: Verify the bundled recorder is present and signed
+        run: |
+          test -x build/hark.app/Contents/MacOS/rec
+          codesign --verify --strict build/hark.app/Contents/MacOS/rec

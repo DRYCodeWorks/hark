@@ -18,3 +18,7 @@ config.toml
 
 # Local migration notes, not part of the project.
 LAPTOP-MIGRATION.local.md
+
+# Built agent bundle. client/agent/build-agent.sh writes here; the sources it
+# compiles are the tracked artifact, never the .app.
+build/

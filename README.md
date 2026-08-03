@@ -156,6 +156,38 @@ It:
 
 Safe to re-run at any time; every step checks current state first.
 
+#### Native agent (preview, opt-in)
+
+There is a second client — a native Swift agent that does the same job without
+Hammerspoon. It is not the default yet, and installing it changes nothing about
+the Hammerspoon path:
+
+```bash
+./install-agent.sh          # build, install to ~/Applications, load at login
+./install-agent.sh --doctor # read-only diagnosis
+./install-agent.sh --uninstall
+```
+
+Why it exists: Accessibility is currently granted to Hammerspoon — a
+general-purpose scriptable Lua runtime — and its config is a symlink into this
+repo, so `git pull` changes what that grant covers without re-prompting. A
+single-purpose bundle asks for the same permission with far less behind it.
+See [issue #2](https://github.com/DRYCodeWorks/hark/issues/2).
+
+**The two clients cannot both hold the hotkey.** `Ctrl+Alt+Space` is a
+system-wide registration and exactly one process gets it; whichever starts
+first wins and the other reports that it could not register. `install-agent.sh`
+quits Hammerspoon for you unless you pass `--keep-hammerspoon`.
+
+Migration is non-destructive in both directions. `~/.hammerspoon/hark-config.lua`
+is read into `~/.config/hark/client.json` and never modified, so rolling back is
+just `./install-agent.sh --uninstall` and relaunching Hammerspoon.
+
+You will be prompted for Microphone and Accessibility again — TCC keys grants to
+a code identity, and the agent is a different one from Hammerspoon. Until a
+Developer ID certificate is in place the bundle is ad-hoc signed, which means
+those grants survive until the binary changes and you re-grant after a rebuild.
+
 ### 3. Configuration
 
 Everything is optional — the defaults are the working single-machine setup.
@@ -383,15 +415,20 @@ transient.
 ```
 install-server.sh          transcription side: deps, model, plists, services
 install-client.sh          hotkey/mic/paste side, plus --doctor
+install-agent.sh           native agent install/doctor/uninstall (preview)
 client/
   init.lua                 Hammerspoon client
   rec.swift                AVAudioEngine recorder, built at install time
   hark-config.example.lua  shape of ~/.hammerspoon/hark-config.lua
+  agent/
+    hark-agent.swift       native client — hotkey, capture, POST, paste
+    Info.plist             bundle identity + microphone usage string
+    build-agent.sh         assembles and signs hark.app
 config.example.toml        shape of ~/.config/hark/config.toml
 src/hark/                  the HTTP service
 launchd/                   plist templates, rendered by hark.plists
-tests/                     pytest suite (67) + test_client_record.lua (8)
-.github/workflows/ci.yml   both suites + shellcheck, on Linux and macOS
+tests/                     pytest suite + test_client_record.lua (8)
+.github/workflows/ci.yml   both suites + shellcheck + the agent build
 docs/                      design spec + implementation plan
 ```
 
@@ -400,7 +437,9 @@ Run the suites locally the way CI does:
 ```bash
 uv run --locked pytest -q
 lua tests/test_client_record.lua
-shellcheck install-server.sh install-client.sh
+shellcheck install-server.sh install-client.sh install-agent.sh \
+           client/agent/build-agent.sh
+./client/agent/build-agent.sh          # macOS only
 ```
 
 ## License
