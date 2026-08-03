@@ -121,12 +121,11 @@ class TestVerifyModel:
         assert re.search(r'"[0-9a-f]{40}"', line), f"not a full commit sha: {line}"
 
 
-def run_check_server_installed(venv_dir: Path) -> tuple[int, str]:
-    """Run check_server_installed against a fabricated install prefix."""
+def run_check_server_installed(app_dst: Path) -> tuple[int, str]:
+    """Run check_server_installed against a fabricated bundle."""
     program = f"""
     source {SCRIPT}
-    VENV_DIR="{venv_dir}"
-    VENV_PYTHON="$VENV_DIR/bin/python"
+    APP_DST="{app_dst}"
     check_server_installed
     """
     result = subprocess.run(
@@ -139,26 +138,19 @@ def run_check_server_installed(venv_dir: Path) -> tuple[int, str]:
 
 
 class TestServerInstalled:
-    """The plists name an absolute path inside the install prefix, and launchd
-    reports a bad one only as a restart loop plus a spawn error in a log file
-    nobody is watching. This check is the thing that says so out loud, so it
-    must not PASS on an install that cannot actually run.
+    """The plist names an absolute path inside the bundle, and launchd reports a
+    bad one only as a restart loop plus a spawn error in a log file nobody is
+    watching. This check is the thing that says so out loud, so it must not PASS
+    on an install that cannot actually run.
     """
 
-    def _venv(self, tmp_path: Path, *, importable: bool) -> Path:
-        venv = tmp_path / "venv"
-        (venv / "bin").mkdir(parents=True)
-        (venv / "bin" / "uvicorn").write_text("#!/bin/sh\n")
-        (venv / "bin" / "uvicorn").chmod(0o755)
-        python = venv / "bin" / "python"
-        python.write_text("#!/bin/sh\nexit %d\n" % (0 if importable else 1))
-        python.chmod(0o755)
-        return venv
-
-    def test_a_working_install_passes(self, tmp_path):
-        status, out = run_check_server_installed(self._venv(tmp_path, importable=True))
-        assert status == 0, out
-        assert "FAIL" not in out
+    def _bundle(self, tmp_path: Path, *, executable: bool = True) -> Path:
+        app = tmp_path / "Hark.app"
+        (app / "Contents" / "MacOS").mkdir(parents=True)
+        binary = app / "Contents" / "MacOS" / "hark"
+        binary.write_text("#!/bin/sh\necho 'usage: hark <serve|agent>' >&2\nexit 2\n")
+        binary.chmod(0o755 if executable else 0o644)
+        return app
 
     def test_a_missing_install_fails(self, tmp_path):
         status, out = run_check_server_installed(tmp_path / "not-installed")
@@ -166,12 +158,20 @@ class TestServerInstalled:
         assert "FAIL" in out
         assert "install-server.sh" in out
 
-    def test_a_venv_that_cannot_import_hark_is_not_a_pass(self, tmp_path):
-        # The trap this exists for: uvicorn is on disk, so an existence check
-        # alone would PASS, while launchd cannot start the app at all.
-        status, out = run_check_server_installed(self._venv(tmp_path, importable=False))
+    def test_a_non_executable_binary_is_not_a_pass(self, tmp_path):
+        # The trap: the bundle exists, so a directory check alone would PASS
+        # while launchd cannot spawn it at all.
+        status, out = run_check_server_installed(self._bundle(tmp_path, executable=False))
         assert status != 0, out
-        assert "cannot import hark" in out
+        assert "FAIL" in out
+
+    def test_an_unsigned_bundle_is_not_a_pass(self, tmp_path):
+        # A fabricated bundle has no signature. Signature verification is what
+        # catches a partially-replaced bundle, whose only other symptom is an
+        # unexplained TCC re-prompt much later.
+        status, out = run_check_server_installed(self._bundle(tmp_path))
+        assert status != 0, out
+        assert "signature" in out
 
 
 def test_sourcing_the_script_installs_nothing():
