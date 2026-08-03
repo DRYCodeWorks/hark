@@ -106,6 +106,57 @@ class TestInfoPlist:
         assert f'MacOS/{plist["CFBundleExecutable"]}' in BUILD_SCRIPT.read_text()
 
 
+class TestEntitlements:
+    """The hardened runtime turns a missing entitlement into a non-event.
+
+    Observed 2026-08-03: with `--options runtime` but no
+    com.apple.security.device.audio-input, tccd logs "Policy disallows prompt
+    ... access to kTCCServiceMicrophone denied" and never shows a dialog. The
+    app therefore never appears in the Microphone pane at all — that pane
+    lists only apps that have successfully requested — and the code sees
+    .denied instantly, indistinguishable from a real user refusal. Nothing
+    short of the unified log names the cause.
+    """
+
+    ENTITLEMENTS = REPO / "client" / "agent" / "hark-agent.entitlements"
+
+    def test_declares_audio_input(self):
+        ents = plistlib.loads(self.ENTITLEMENTS.read_bytes())
+        assert ents.get("com.apple.security.device.audio-input") is True
+
+    def test_the_build_signs_both_binaries_with_it(self):
+        # The app is the responsible process tccd checks the entitlement on;
+        # rec is the process that actually opens the device. Signing only one
+        # of them reintroduces the same silent denial.
+        build = BUILD_SCRIPT.read_text()
+        assert build.count("--entitlements") >= 2
+
+    def test_the_build_fails_when_the_entitlement_is_missing(self):
+        # A signature that merely *verifies* proves nothing here: the bundle
+        # signs, launches and runs fine without the entitlement and only fails
+        # at the microphone, where it looks like a permission problem rather
+        # than a build problem. So the build asserts it explicitly.
+        build = BUILD_SCRIPT.read_text()
+        assert "com.apple.security.device.audio-input" in build
+        assert "codesign -d --entitlements" in build
+
+    def test_hardened_runtime_stays_on(self):
+        # Dropping --options runtime would also fix the microphone, and would
+        # break notarization later instead. The entitlement is the right fix.
+        assert "--options runtime" in BUILD_SCRIPT.read_text()
+
+
+def test_rec_permission_help_does_not_name_a_single_app():
+    # rec is spawned by both clients and TCC attributes the grant to whichever
+    # is responsible, so the row to enable reads "Hammerspoon" under the Lua
+    # client and "hark" under the agent. Naming one sends half the users
+    # looking for a row that was never going to be there.
+    rec = (REPO / "client" / "rec.swift").read_text()
+    start = rec.index("let permissionHelp")
+    help_text = rec[start : rec.index("\n\n", start)]
+    assert "hark" in help_text and "Hammerspoon" in help_text
+
+
 def test_launchagent_label_matches_the_bundle_id():
     # Not required by macOS, but a mismatch makes every diagnostic ambiguous -
     # and check_accessibility below looks the client up in TCC.db BY this

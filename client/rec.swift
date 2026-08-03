@@ -59,8 +59,13 @@ let maxSeconds = args.count >= 3 ? Double(args[2]) : nil
 // So a frame count can never see a denial - and neither can the sample-rate
 // guard below, because format negotiation succeeds under denial too. The only
 // way to learn the answer is to ask TCC for it.
+// Deliberately does NOT name the app to enable. rec is spawned by both
+// clients, and TCC attributes the grant to whichever is RESPONSIBLE - so the
+// row to switch on says "Hammerspoon" under the Lua client and "hark" under
+// the native agent. Naming one sent users to look for a row that was never
+// going to be there.
 let permissionHelp = "System Settings -> Privacy & Security -> Microphone "
-    + "-> turn Hammerspoon ON"
+    + "-> turn on the app that launched this (hark, or Hammerspoon)"
 
 switch AVCaptureDevice.authorizationStatus(for: .audio) {
 case .authorized:

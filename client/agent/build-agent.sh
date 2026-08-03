@@ -70,12 +70,38 @@ log "signing with identity: $SIGN_IDENTITY"
 # signature rather than failing on it. --deep is deliberately NOT used: it is
 # deprecated and signs nested code with the wrong flags; the explicit rec sign
 # below is the supported way to cover a nested binary.
+#
+# --entitlements is NOT optional under the hardened runtime. Microphone access
+# requires com.apple.security.device.audio-input, and without it TCC refuses to
+# PROMPT rather than denying after a prompt - so the app never appears in the
+# Microphone pane and the code sees an instant .denied it cannot distinguish
+# from a real refusal. See the entitlements file for the tccd log line.
+#
+# Both binaries get it: rec is the process that opens the device, and the app
+# is the responsible process tccd checks the entitlement on.
+ENTITLEMENTS="$AGENT_DIR/hark-agent.entitlements"
+
 codesign --force --options runtime --timestamp=none \
+  --entitlements "$ENTITLEMENTS" \
   --sign "$SIGN_IDENTITY" "$APP/Contents/MacOS/rec"
 codesign --force --options runtime --timestamp=none \
+  --entitlements "$ENTITLEMENTS" \
   --sign "$SIGN_IDENTITY" "$APP"
 
 log "verifying"
 codesign --verify --strict --verbose=2 "$APP" 2>&1 | sed 's/^/    /'
+
+# Assert the entitlement actually made it into the signature. A signature that
+# verifies is not evidence of this: the app signs, launches and runs perfectly
+# without it, and only fails when it reaches for the microphone - at which
+# point the failure names a permission problem rather than a build problem.
+if ! codesign -d --entitlements - --xml "$APP" 2>/dev/null \
+  | plutil -convert xml1 -o - - 2>/dev/null \
+  | grep -q "com.apple.security.device.audio-input"; then
+  err "the signed bundle is missing com.apple.security.device.audio-input"
+  err "TCC will refuse to prompt and the microphone will read as denied."
+  exit 1
+fi
+log "entitlement present: com.apple.security.device.audio-input"
 
 log "built $APP"

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- REQUIRED, and its absence is silent in the worst way.
+
+	     Under the hardened runtime (which build-agent.sh enables, and which
+	     notarization will require) microphone access needs this entitlement.
+	     Without it TCC does not deny the request after asking - it refuses to
+	     ASK. tccd logs:
+
+	       Prompting policy for hardened runtime; service: kTCCServiceMicrophone
+	       requires entitlement com.apple.security.device.audio-input but it is
+	       missing for responsible={com.drycodeworks.hark-agent}
+	       Policy disallows prompt for ...; access to kTCCServiceMicrophone denied
+
+	     What the user sees is an app that never appears in System Settings ->
+	     Privacy & Security -> Microphone at all, because that pane lists only
+	     apps that have successfully requested. What the code sees is
+	     AVCaptureDevice.authorizationStatus returning .denied instantly, which
+	     is indistinguishable from a real user denial. Neither end names the
+	     entitlement; only the unified log does. -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>

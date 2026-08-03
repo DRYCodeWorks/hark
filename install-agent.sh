@@ -427,12 +427,30 @@ if [[ "$KEEP_HAMMERSPOON" -eq 0 ]] && pgrep -x Hammerspoon >/dev/null 2>&1; then
   sleep 1
 fi
 
+# Cleared BEFORE the agent restarts, so the wait below observes THIS run's
+# probe rather than instantly succeeding on the previous run's file.
+rm -f "$MIC_STATUS"
+
 write_plist
 reload_agent
 
-# The agent needs a moment to register the hotkey, run its microphone probe
-# and write the status file the doctor reads.
-sleep 3
+# Wait for the agent's microphone probe to report, rather than sleeping a
+# fixed interval. The probe cannot finish until the user has answered the
+# consent dialog, so any fixed wait either races a human or pads every
+# already-granted re-run. A 3s sleep here reported a spurious FAIL on the
+# first install, with the prompt still on screen.
+printf '==> waiting for the microphone probe (answer the prompt if one appears)'
+probe_started_at="$(date +%s)"
+while [[ ! -f "$MIC_STATUS" ]]; do
+  if [[ $(($(date +%s) - probe_started_at)) -ge 45 ]]; then
+    printf '\n'
+    warn "the probe did not report within 45s — the doctor below may be stale"
+    break
+  fi
+  printf '.'
+  sleep 1
+done
+printf '\n'
 
 printf '\n'
 if run_doctor; then
