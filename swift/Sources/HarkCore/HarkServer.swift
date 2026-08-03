@@ -63,6 +63,10 @@ public protocol WhisperTranscribing {
 extension WhisperClient: WhisperTranscribing {}
 
 public final class HarkServer {
+    /// 0.0.0.0 and :: are every interface; "" is how most socket APIs spell
+    /// the same thing. Mirrors WILDCARD_BINDS in src/hark/plists.py.
+    static let wildcardBinds: Set<String> = ["0.0.0.0", "::", ""]
+
     let config: HarkConfig
     let key: String
     let whisper: any WhisperTranscribing
@@ -90,7 +94,40 @@ public final class HarkServer {
         guard let p = NWEndpoint.Port(rawValue: portNumber) else {
             throw HarkServerError.bindFailed("invalid port \(portNumber)")
         }
-        let listener = try NWListener(using: .tcp, on: p)
+
+        // REFUSE A WILDCARD BIND. hark's response is pasted into whatever has
+        // focus, so an endpoint reachable from every attached network lets
+        // anyone who can route here choose what gets typed into the user's
+        // terminal. This is a remote keystroke injector, not a data leak.
+        //
+        // The Python server has enforced this since #6; porting the server
+        // without it silently undid that fix.
+        let host = config.bindHost.trimmingCharacters(in: .whitespaces)
+        guard !Self.wildcardBinds.contains(host) else {
+            throw HarkServerError.bindFailed(
+                """
+                server.bind is "\(config.bindHost)", which listens on every network \
+                interface.
+                hark's response is pasted into whatever has focus, so this lets anyone \
+                who can reach this machine choose what gets typed.
+                Use 127.0.0.1 for a single machine, or the private address of this \
+                machine (a tailnet/VPN/LAN IP) for the two-machine setup.
+                Set it in ~/.config/hark/config.toml.
+                """)
+        }
+
+        // BIND TO THE CONFIGURED HOST. `NWListener(using: .tcp, on: p)` listens
+        // on every interface regardless of config, so `bind` was decorative:
+        // measured with bind = "127.0.0.1", lsof reported `TCP *:8914 (LISTEN)`
+        // and another machine on the tailnet got a 200 — while the log claimed
+        // loopback. requiredLocalEndpoint is what actually restricts it.
+        let params = NWParameters.tcp
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: p)
+        params.allowLocalEndpointReuse = true
+
+        // No `on:` — requiredLocalEndpoint already carries the port, and
+        // supplying both is EINVAL ("Invalid argument") at listener creation.
+        let listener = try NWListener(using: params)
         listener.newConnectionHandler = { [weak self] conn in
             self?.handle(conn)
         }
@@ -98,7 +135,8 @@ public final class HarkServer {
             if case .failed(let e) = state { logger.error("listener failed: \(e)") }
         }
         listener.start(queue: .global(qos: .userInitiated))
-        logger.info("hark listening on \(config.bindHost):\(portNumber)")
+        // Reports the host it was actually bound to, not the one requested.
+        logger.info("hark listening on \(host):\(portNumber)")
         return listener
     }
 
@@ -143,6 +181,15 @@ public final class HarkServer {
             } catch HTTPParseError.incomplete {
                 // Need more data.
                 self.receiveLoop(conn, buffer: buf)
+            } catch HTTPParseError.tooLarge {
+                // 413 rather than 400: the request was understood and refused
+                // on size, and saying so is what tells a client to send less
+                // rather than to send it again.
+                let resp = HTTPResponse(status: 413, contentType: "application/json",
+                                        body: Data("{\"detail\":\"request body too large\"}".utf8))
+                conn.send(content: resp.serialized, completion: .contentProcessed { _ in
+                    conn.cancel()
+                })
             } catch {
                 // Unparseable request: 400.
                 let resp = HTTPResponse(status: 400, contentType: "application/json",
@@ -315,10 +362,16 @@ enum ConstantTime {
     }
 }
 
-enum HTTPParseError: Error {
+enum HTTPParseError: Error, Equatable {
     case incomplete
     case malformed
+    case tooLarge
 }
+
+/// 16 MB — roughly 8 minutes of 16 kHz mono s16, far past any hold-to-talk
+/// utterance. The client caps its own uploads at 1 MB; this is the server
+/// refusing to trust that.
+let maxBodyBytes = 16 * 1024 * 1024
 
 enum HTTPParser {
     /// Parse a single HTTP/1.1 request if the buffer holds it completely.
@@ -348,6 +401,13 @@ enum HTTPParser {
         }
 
         let contentLength = Int(headers["content-length"] ?? "0") ?? 0
+
+        // CAP THE BODY. The body is parsed before routing, so before the key is
+        // checked — an unauthenticated request can otherwise make the server
+        // buffer whatever Content-Length it claims. 16 MB is ~8 minutes of the
+        // 16 kHz mono s16 audio this accepts, well past any hold-to-talk
+        // utterance, and refusing here costs nothing a real client would miss.
+        guard contentLength <= maxBodyBytes else { throw HTTPParseError.tooLarge }
         let bodyStart = headerEnd.upperBound
         let available = data.count - bodyStart
         guard available >= contentLength else { throw HTTPParseError.incomplete }
