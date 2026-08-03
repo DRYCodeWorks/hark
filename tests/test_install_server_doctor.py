@@ -219,3 +219,120 @@ def test_a_label_that_merely_contains_ours_is_not_a_match():
     status, out = run_check(listing("com.example.com.drycodeworks.hark.backup"))
     assert status != 0
     assert out.count("FAIL") == 2
+
+
+class TestPlistRendering:
+    """The launchd drift guard, ported from test_launchd_config_sync.py.
+
+    The plists are now rendered by install-server.sh rather than by a Python
+    module, but what they must satisfy is unchanged: they are what launchd
+    actually runs, and a wrong one surfaces only as a restart loop and a spawn
+    error in a log nobody is watching.
+    """
+
+    def _render(self, tmp_path: Path, config: str) -> tuple[int, dict[str, str]]:
+        cfg_dir = tmp_path / ".config" / "hark"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "config.toml").write_text(config)
+        agents = tmp_path / "Library" / "LaunchAgents"
+        agents.mkdir(parents=True)
+        program = f"""
+        source {SCRIPT}
+        CONFIG_FILE="{cfg_dir}/config.toml"
+        LAUNCH_AGENTS="{agents}"
+        APP_DST="{tmp_path}/Hark.app"
+        MODEL_PATH="{tmp_path}/model.bin"
+        render_plists
+        """
+        r = subprocess.run(["bash", "-c", program], capture_output=True, text=True,
+                           env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
+        rendered = {p.name: p.read_text() for p in agents.glob("*.plist")}
+        return r.returncode, rendered
+
+    ONE_MACHINE = '[server]\nbind = "127.0.0.1"\nport = 8911\n\n[whisper]\nport = 8910\n'
+
+    def test_both_plists_are_rendered(self, tmp_path):
+        rc, plists = self._render(tmp_path, self.ONE_MACHINE)
+        assert rc == 0
+        assert set(plists) == {"com.drycodeworks.hark.plist",
+                               "com.drycodeworks.hark-whisper.plist"}
+
+    def test_no_placeholder_survives(self, tmp_path):
+        _, plists = self._render(tmp_path, self.ONE_MACHINE)
+        for name, text in plists.items():
+            assert "@" not in text, f"{name} still has an unsubstituted placeholder"
+            assert "${" not in text, f"{name} has an unexpanded shell variable"
+
+    def test_the_port_matches_config(self, tmp_path):
+        cfg = '[server]\nbind = "127.0.0.1"\nport = 9111\n\n[whisper]\nport = 9110\n'
+        _, plists = self._render(tmp_path, cfg)
+        assert "9110" in plists["com.drycodeworks.hark-whisper.plist"]
+
+    def test_whisper_stays_on_loopback(self, tmp_path):
+        # whisper handles raw audio. It must never be reachable off-box, and
+        # its host is deliberately not configurable.
+        cfg = '[server]\nbind = "100.64.66.46"\nport = 8911\n\n[whisper]\nport = 8910\n'
+        _, plists = self._render(tmp_path, cfg)
+        w = plists["com.drycodeworks.hark-whisper.plist"]
+        assert "127.0.0.1" in w
+        assert "100.64.66.46" not in w, "the tailnet address leaked into whisper's plist"
+
+    def test_the_plist_points_at_the_installed_bundle_not_the_clone(self, tmp_path):
+        _, plists = self._render(tmp_path, self.ONE_MACHINE)
+        hark = plists["com.drycodeworks.hark.plist"]
+        assert str(tmp_path / "Hark.app") in hark
+        assert "/swift/Packaging/" not in hark, "points into the build tree, not the install"
+
+    def test_it_runs_the_serve_role(self, tmp_path):
+        _, plists = self._render(tmp_path, self.ONE_MACHINE)
+        assert "<string>serve</string>" in plists["com.drycodeworks.hark.plist"]
+
+    def test_the_server_plist_carries_no_address(self, tmp_path):
+        """`hark serve` reads config.toml itself, so the plist encodes nothing.
+
+        uvicorn needed --host and --port baked into the plist, which is exactly
+        what the old drift guard existed to police: two copies of the same fact
+        that could disagree. There is now one copy.
+        """
+        cfg = '[server]\nbind = "100.64.66.46"\nport = 9911\n\n[whisper]\nport = 8910\n'
+        _, plists = self._render(tmp_path, cfg)
+        hark = plists["com.drycodeworks.hark.plist"]
+        assert "100.64.66.46" not in hark
+        assert "9911" not in hark
+
+    def test_no_working_directory_is_set(self, tmp_path):
+        # A WorkingDirectory would make the service depend on a path that can
+        # move, which is the failure the install prefix exists to avoid.
+        _, plists = self._render(tmp_path, self.ONE_MACHINE)
+        for text in plists.values():
+            assert "WorkingDirectory" not in text
+
+    @pytest.mark.parametrize("host", ["0.0.0.0", "::"])
+    def test_a_wildcard_bind_is_refused_at_render(self, tmp_path, host):
+        # `hark serve` also refuses this, but launchd answers that with a crash
+        # loop — catching it here is the difference between a message and a
+        # restart storm.
+        cfg = f'[server]\nbind = "{host}"\nport = 8911\n\n[whisper]\nport = 8910\n'
+        rc, plists = self._render(tmp_path, cfg)
+        assert rc != 0, f"bind {host!r} must be refused"
+        assert plists == {}, "nothing should be written when the bind is refused"
+
+    def test_an_empty_bind_falls_back_to_loopback(self, tmp_path):
+        """`bind = ""` means unset, not "every interface".
+
+        The Python guard refused it, because there the value went straight to a
+        socket API where empty spells the wildcard. Here it never reaches one:
+        an absent or empty value takes the default, and the default is
+        loopback. Defaulting to the safe end is better than refusing, but it is
+        a deliberate difference rather than an oversight.
+        """
+        cfg = '[server]\nbind = ""\nport = 8911\n\n[whisper]\nport = 8910\n'
+        rc, plists = self._render(tmp_path, cfg)
+        assert rc == 0
+        assert plists != {}
+
+    @pytest.mark.parametrize("host", ["127.0.0.1", "100.64.66.46", "192.168.1.10"])
+    def test_private_binds_are_allowed(self, tmp_path, host):
+        cfg = f'[server]\nbind = "{host}"\nport = 8911\n\n[whisper]\nport = 8910\n'
+        rc, _ = self._render(tmp_path, cfg)
+        assert rc == 0

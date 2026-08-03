@@ -1,15 +1,7 @@
-import pytest
+"""Shared pytest configuration.
 
-TEST_KEY = "test-shared-secret"
-
-
-@pytest.fixture(autouse=True)
-def hark_key(monkeypatch):
-    """Pin the shared secret for every test.
-
-    Also keeps the suite from touching the real key file under $HOME: with
-    HARK_KEY set, config.hark_key() never falls through to the file.
-    """
-    monkeypatch.setenv("HARK_KEY", TEST_KEY)
-    monkeypatch.delenv("HARK_KEY_FILE", raising=False)
-    return TEST_KEY
+The suite is now entirely about the shell installers — the Python server it
+used to exercise was replaced by `hark serve` and deleted. Its fixtures
+(HARK_KEY, and keeping tests off the real key file) went with it: nothing here
+imports hark, and every test that touches $HOME is already given a tmp_path.
+"""

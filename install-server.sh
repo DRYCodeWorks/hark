@@ -241,6 +241,75 @@ run_doctor() {
 
 # Sourcing this file defines the check_* functions and stops here, so the test
 # suite can exercise them without running an install. Everything below this
+render_plists() {
+  log "Rendering launchd plists from config..."
+  mkdir -p "$LAUNCH_AGENTS"
+  
+  BIND="$(config_value server bind 127.0.0.1)"
+  # Refused here as well as in `hark serve`. The server exits with an
+  # explanation, but launchd answers that with a crash loop, so catching it at
+  # render is the difference between a message and a restart storm.
+  case "$(printf '%s' "$BIND" | tr -d '[:space:]')" in
+    0.0.0.0|::|"")
+      err "server.bind is \"${BIND}\", which listens on every network interface."
+      err "hark's response is pasted into whatever has focus, so this lets anyone"
+      err "who can reach this machine choose what gets typed."
+      err "Use 127.0.0.1, or this machine's private (tailnet/VPN/LAN) address."
+      return 1
+      ;;
+  esac
+  PORT="$(config_value server port 8911)"
+  WHISPER_PORT="$(config_value whisper port 8910)"
+  WHISPER_BIN="$(command -v whisper-server || echo /opt/homebrew/bin/whisper-server)"
+  
+  cat > "$LAUNCH_AGENTS/com.drycodeworks.hark.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>com.drycodeworks.hark</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>${APP_DST}/Contents/MacOS/hark</string>
+		<string>serve</string>
+	</array>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><true/>
+	<key>StandardOutPath</key><string>/tmp/hark.log</string>
+	<key>StandardErrorPath</key><string>/tmp/hark.err</string>
+</dict>
+</plist>
+PLIST
+  
+  cat > "$LAUNCH_AGENTS/com.drycodeworks.hark-whisper.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>com.drycodeworks.hark-whisper</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>${WHISPER_BIN}</string>
+		<string>--model</string>
+		<string>${MODEL_PATH}</string>
+		<string>--host</string>
+		<string>127.0.0.1</string>
+		<string>--port</string>
+		<string>${WHISPER_PORT}</string>
+		<string>--language</string>
+		<string>en</string>
+	</array>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><true/>
+	<key>StandardOutPath</key><string>/tmp/hark-whisper.log</string>
+	<key>StandardErrorPath</key><string>/tmp/hark-whisper.err</string>
+</dict>
+</plist>
+PLIST
+  
+  log "Rendered both plists (hark: ${BIND}:${PORT}, whisper: 127.0.0.1:${WHISPER_PORT})"
+}
+
 # line only runs when the script is executed directly.
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
@@ -353,60 +422,7 @@ fi
 # all. The wildcard-bind check is enforced by `hark serve` itself at startup —
 # it refuses 0.0.0.0 with an explanation — so this does not re-implement it.
 
-log "Rendering launchd plists from config..."
-mkdir -p "$LAUNCH_AGENTS"
-
-BIND="$(config_value server bind 127.0.0.1)"
-PORT="$(config_value server port 8911)"
-WHISPER_PORT="$(config_value whisper port 8910)"
-WHISPER_BIN="$(command -v whisper-server || echo /opt/homebrew/bin/whisper-server)"
-
-cat > "$LAUNCH_AGENTS/com.drycodeworks.hark.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key><string>com.drycodeworks.hark</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>${APP_DST}/Contents/MacOS/hark</string>
-		<string>serve</string>
-	</array>
-	<key>RunAtLoad</key><true/>
-	<key>KeepAlive</key><true/>
-	<key>StandardOutPath</key><string>/tmp/hark.log</string>
-	<key>StandardErrorPath</key><string>/tmp/hark.err</string>
-</dict>
-</plist>
-PLIST
-
-cat > "$LAUNCH_AGENTS/com.drycodeworks.hark-whisper.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key><string>com.drycodeworks.hark-whisper</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>${WHISPER_BIN}</string>
-		<string>--model</string>
-		<string>${MODEL_PATH}</string>
-		<string>--host</string>
-		<string>127.0.0.1</string>
-		<string>--port</string>
-		<string>${WHISPER_PORT}</string>
-		<string>--language</string>
-		<string>en</string>
-	</array>
-	<key>RunAtLoad</key><true/>
-	<key>KeepAlive</key><true/>
-	<key>StandardOutPath</key><string>/tmp/hark-whisper.log</string>
-	<key>StandardErrorPath</key><string>/tmp/hark-whisper.err</string>
-</dict>
-</plist>
-PLIST
-
-log "Rendered both plists (hark: ${BIND}:${PORT}, whisper: 127.0.0.1:${WHISPER_PORT})"
+render_plists
 
 # --- 6. Load the services -----------------------------------------------------
 
