@@ -22,8 +22,39 @@
 	<string>Hark records your voice while you hold the dictate hotkey, to transcribe it.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Hark talks to the transcription server on your local network.</string>
+	<!-- ATS cannot express this app's actual policy, so the app enforces its
+	     own and ATS is opened to let it.
+
+	     NSAllowsLocalNetworking alone was not enough: it covers .local names
+	     and link-local addresses, and a Tailscale peer is neither — the
+	     tailnet uses CGNAT space (100.64.0.0/10). The two-machine setup
+	     therefore failed with:
+
+	       Cannot start load of Task ... since it does not conform to ATS policy
+	       finished with error [-1022] ... requires the use of a secure connection
+
+	     while the SAME build worked on the machine running the server,
+	     because there the tailnet address belongs to the local host and
+	     CFNetwork treats it as local. So this is invisible to a
+	     single-machine install and to every test.
+
+	     The exceptions ATS does support are static domain lists, and the
+	     server address here is user configuration — there is nothing to
+	     enumerate at build time.
+
+	     What actually gates connections is ClientConfig.validateTransport,
+	     which is stricter than ATS where it matters: plain HTTP to loopback
+	     always, to a numeric IP only with an explicit opt-in recorded in the
+	     config, and to a HOSTNAME never — where ATS would happily allow a
+	     hostname it considers "local".
+
+	     REMOVE THIS once the server speaks TLS. A tailnet with HTTPS enabled
+	     can issue a real certificate for its MagicDNS name (`tailscale cert`),
+	     and an https:// hostname needs no exception at all. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>

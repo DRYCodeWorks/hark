@@ -474,3 +474,39 @@ class TestStatusDoctor:
     def test_a_missing_status_is_not_a_pass(self, tmp_path):
         rc, out = run_sourced("check_status_freshness", {"HOME": str(tmp_path)})
         assert "FAIL" in out and "PASS" not in out
+
+
+class TestAppTransportSecurity:
+    """ATS blocked the two-machine setup, and only the two-machine setup.
+
+    NSAllowsLocalNetworking covers .local names and link-local addresses. A
+    Tailscale peer is neither — the tailnet uses CGNAT space (100.64.0.0/10) —
+    so a remote peer failed with NSURLErrorDomain -1022 while the identical
+    build worked on the machine running the server, where that address belongs
+    to the local host and CFNetwork treats it as local. Invisible to a
+    single-machine install and to every test that does not cross machines.
+    """
+
+    INFO = REPO / "swift" / "Packaging" / "Info.plist"
+
+    def test_arbitrary_loads_is_declared(self):
+        import plistlib
+
+        ats = plistlib.loads(self.INFO.read_bytes())["NSAppTransportSecurity"]
+        assert ats.get("NSAllowsArbitraryLoads") is True
+
+    def test_the_reason_is_recorded_next_to_it(self):
+        # This key looks like a shortcut and will be "cleaned up" by someone
+        # unless the comment explains that the app enforces a stricter policy
+        # of its own, and says when it can go.
+        text = self.INFO.read_text()
+        assert "-1022" in text
+        assert "validateTransport" in text
+        assert "tailscale cert" in text
+
+    def test_the_app_still_gates_transport_itself(self):
+        # The exception is only defensible because ClientConfig refuses what
+        # ATS would have allowed — notably a hostname over plain HTTP.
+        cc = (REPO / "swift" / "Sources" / "HarkCore" / "ClientConfig.swift").read_text()
+        assert "validateTransport" in cc
+        assert "allowPlaintext" in cc
