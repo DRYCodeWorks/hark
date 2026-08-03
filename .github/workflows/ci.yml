@@ -38,19 +38,6 @@ jobs:
       - name: pytest
         run: uv run --locked pytest -q
 
-      - name: Install Lua
-        run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install lua
-          else
-            sudo apt-get update && sudo apt-get install -y lua5.4
-            sudo ln -sf "$(command -v lua5.4)" /usr/local/bin/lua
-          fi
-
-      # The client-side suite. It has never been wired into anything, so it
-      # only ran when someone remembered it existed.
-      - name: Lua client tests
-        run: lua tests/test_client_record.lua
 
   shellcheck:
     runs-on: ubuntu-latest
@@ -60,3 +47,27 @@ jobs:
       # Preinstalled on the Ubuntu runner image.
       - name: shellcheck
         run: shellcheck install-server.sh install-client.sh
+
+  # The client is macOS-only and needs a real Swift toolchain, so it cannot
+  # join the portable matrix above. Builds the bundle and asserts the signature
+  # verifies — an unsigned or broken-signature bundle is exactly the state in
+  # which TCC grants stop surviving a rebuild.
+  swift:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Test
+        run: cd swift && swift test
+
+      - name: Build Hark.app
+        run: cd swift && swift build -c release && bash Packaging/build-app.sh
+
+      - name: Verify the signature
+        run: codesign --verify --strict --verbose=2 swift/Packaging/Hark.app
+
+      - name: Verify the microphone entitlement survived signing
+        run: |
+          codesign -d --entitlements - --xml swift/Packaging/Hark.app 2>/dev/null \
+            | grep -q 'com.apple.security.device.audio-input' \
+            || { echo "missing audio-input entitlement — TCC will refuse to prompt"; exit 1; }
