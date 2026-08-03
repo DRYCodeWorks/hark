@@ -18,3 +18,9 @@ config.toml
 
 # Local migration notes, not part of the project.
 LAPTOP-MIGRATION.local.md
+
+# SwiftPM build artifacts (the Swift rewrite).
+swift/.build/
+
+# Generated app bundle (rebuilt by swift/Packaging/build-app.sh).
+swift/Packaging/Hark.app/
