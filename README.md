@@ -42,7 +42,7 @@ exposed to nothing.
 
 ```
 ⌃⌥Space held
-  └─► rec (AVAudioEngine) records the mic → 16 kHz mono WAV
+  └─► Recorder (AVAudioEngine) records the mic → 16 kHz mono WAV
 ⌃⌥Space released
   └─► POST /dictate ─────────────►  hark  (HTTP service)
         X-Hark-Key                       │
@@ -70,8 +70,9 @@ last *typed*, in a tool built to stop you typing.
 
 The clipboard is deliberately **not** restored after pasting: the transcript
 stays there, so a misfired paste is recoverable with a manual ⌘V instead of
-re-speaking. See the comment above `hs.pasteboard.setContents` in
-`client/init.lua` for why this should not be "fixed" later.
+re-speaking. See the comment above `apply()` in
+`swift/Sources/hark/AgentController.swift` for why this should not be "fixed"
+later.
 
 ## Install
 
@@ -86,18 +87,22 @@ holds the model and `install-client.sh` on the one you type at.
 
 ### 1. Server
 
-`./install-server.sh` installs `whisper-cpp` and `uv` via Homebrew, downloads
-a model (~1.5 GB, skipped if present), installs the `hark` package into
-`~/.local/share/hark/venv`, generates the shared secret, renders both launchd
-plists from your config, loads them, and waits for `/health`. It refuses to
-report success if the service never answers.
+`./install-server.sh` installs `whisper-cpp` via Homebrew, downloads a model
+(~1.5 GB, skipped if present), builds `swift/` into `~/Applications/Hark.app`,
+renders both launchd plists from your config, loads them, and waits for
+`/health`. It refuses to report success if the service never answers.
 
-**The clone is not load-bearing.** launchd runs the copy under
-`~/.local/share/hark/venv`, by absolute path and with no `WorkingDirectory`, so
+The shared secret is created by the server itself on first start, so there is
+one implementation of how it is generated and persisted.
+
+**The clone is not load-bearing.** launchd runs `hark serve` from
+`~/Applications/Hark.app`, by absolute path and with no `WorkingDirectory`, so
 you can move or delete the checkout without breaking the service — and `git
 pull` does not live-patch a running daemon. Upgrading is deliberate: pull, then
-re-run `./install-server.sh`. The venv is rebuilt from scratch each time, so a
-dependency you removed actually goes away.
+re-run `./install-server.sh`.
+
+It is the same bundle `install-client.sh` installs. One signed binary, two
+roles: `hark serve` here, `hark agent` on whatever Mac you dictate from.
 
 The model is pinned to a specific upstream revision and verified against a
 recorded SHA-256 before it is moved into place — not tracking a mutable
@@ -432,7 +437,7 @@ Nothing on the ffmpeg side fixes this: the avfoundation demuxer exposes no
 audio-format option (every knob it has is video-side), there is no packed
 format on the hardware to pin to, and avfoundation is ffmpeg's only macOS input
 backend. `AVAudioEngine`'s `inputNode` is Float32 by contract, so
-`client/rec.swift` cannot hit this failure mode.
+`swift/Sources/hark/Recorder.swift` cannot hit this failure mode.
 
 The first fix attempted — retry ffmpeg when it dies early — was wrong. A
 relaunch renegotiates the same format. Intermittent is not the same as
