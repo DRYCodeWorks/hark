@@ -53,9 +53,14 @@
 	     and an https:// hostname needs no exception at all. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
+		<!-- ONLY this key. Do not add NSAllowsLocalNetworking back.
+		     Apple: if NSAllowsLocalNetworking is present, the system IGNORES
+		     NSAllowsArbitraryLoads on macOS 10.12+. The two together are not
+		     additive — the more specific key wins and the general one is
+		     silently discarded, which is how a bundle can carry
+		     NSAllowsArbitraryLoads=true and still fail every request with
+		     -1022. Verified exactly that way here. -->
 		<key>NSAllowsArbitraryLoads</key>
-		<true/>
-		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 </dict>

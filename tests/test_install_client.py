@@ -495,6 +495,20 @@ class TestAppTransportSecurity:
         ats = plistlib.loads(self.INFO.read_bytes())["NSAppTransportSecurity"]
         assert ats.get("NSAllowsArbitraryLoads") is True
 
+    def test_local_networking_is_not_also_declared(self):
+        """The two keys are not additive — the specific one silently wins.
+
+        Apple: if NSAllowsLocalNetworking is present, the system IGNORES
+        NSAllowsArbitraryLoads on macOS 10.12+. A bundle can therefore carry
+        NSAllowsArbitraryLoads=true and still fail every request with -1022,
+        which is exactly what happened here: the exception was inert and the
+        installed plist looked correct.
+        """
+        import plistlib
+
+        ats = plistlib.loads(self.INFO.read_bytes())["NSAppTransportSecurity"]
+        assert "NSAllowsLocalNetworking" not in ats
+
     def test_the_reason_is_recorded_next_to_it(self):
         # This key looks like a shortcut and will be "cleaned up" by someone
         # unless the comment explains that the app enforces a stricter policy
