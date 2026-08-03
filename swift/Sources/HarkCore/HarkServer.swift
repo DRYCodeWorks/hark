@@ -67,6 +67,9 @@ public final class HarkServer {
     /// the same thing. Mirrors WILDCARD_BINDS in src/hark/plists.py.
     static let wildcardBinds: Set<String> = ["0.0.0.0", "::", ""]
 
+    /// The address connections must have arrived at, set by start().
+    private var boundHost = "127.0.0.1"
+
     let config: HarkConfig
     let key: String
     let whisper: any WhisperTranscribing
@@ -116,18 +119,25 @@ public final class HarkServer {
                 """)
         }
 
-        // BIND TO THE CONFIGURED HOST. `NWListener(using: .tcp, on: p)` listens
-        // on every interface regardless of config, so `bind` was decorative:
-        // measured with bind = "127.0.0.1", lsof reported `TCP *:8914 (LISTEN)`
-        // and another machine on the tailnet got a 200 — while the log claimed
-        // loopback. requiredLocalEndpoint is what actually restricts it.
+        // `NWListener(using: .tcp, on: p)` accepts on every interface regardless
+        // of config, so `bind` was decorative: measured with bind = "127.0.0.1",
+        // lsof reported `TCP *:8914 (LISTEN)` and another machine on the tailnet
+        // got a 200 — while the log claimed loopback.
+        //
+        // requiredLocalEndpoint restricts it, but too much: it is stricter than
+        // a BSD bind(). A connection from the SERVER'S OWN machine to its own
+        // tailnet address is delivered over loopback, so its path does not match
+        // the utun endpoint and the handshake never completes — measured, the
+        // Studio timed out reaching its own server while the laptop got a 200.
+        // That breaks the single-machine setup on a tailnet, which is the most
+        // common one.
+        //
+        // So the address is enforced per-connection instead, in handle(), which
+        // is where the security question actually lives: refuse to SERVE anyone
+        // who did not arrive at the configured address.
         let params = NWParameters.tcp
-        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: p)
         params.allowLocalEndpointReuse = true
-
-        // No `on:` — requiredLocalEndpoint already carries the port, and
-        // supplying both is EINVAL ("Invalid argument") at listener creation.
-        let listener = try NWListener(using: params)
+        let listener = try NWListener(using: params, on: p)
         listener.newConnectionHandler = { [weak self] conn in
             self?.handle(conn)
         }
@@ -135,7 +145,7 @@ public final class HarkServer {
             if case .failed(let e) = state { logger.error("listener failed: \(e)") }
         }
         listener.start(queue: .global(qos: .userInitiated))
-        // Reports the host it was actually bound to, not the one requested.
+        boundHost = host
         logger.info("hark listening on \(host):\(portNumber)")
         return listener
     }
@@ -152,10 +162,35 @@ public final class HarkServer {
         conn.stateUpdateHandler = { [weak self, weak conn] state in
             guard let self, let conn else { return }
             if case .ready = state {
+                // Enforce server.bind here rather than on the listener. hark's
+                // response is pasted into whatever has focus, so serving a
+                // connection that arrived on an interface the operator did not
+                // name is the thing to prevent — and refusing at accept costs
+                // an attacker a handshake and gets them nothing.
+                guard self.arrivedAtConfiguredAddress(conn) else {
+                    self.logger.error("refused a connection that did not arrive at \(self.boundHost)")
+                    conn.cancel()
+                    return
+                }
                 self.receiveLoop(conn, buffer: Data())
             }
         }
         conn.start(queue: .global(qos: .default))
+    }
+
+    /// True when the connection's local address is the one `server.bind` names.
+    ///
+    /// Loopback is always accepted: a client on this machine may reach the
+    /// server either by 127.0.0.1 or by the machine's own configured address,
+    /// and both are the same trust boundary.
+    private func arrivedAtConfiguredAddress(_ conn: NWConnection) -> Bool {
+        guard case .hostPort(let host, _)? = conn.currentPath?.localEndpoint else {
+            // No path yet: fail closed rather than guess.
+            return false
+        }
+        let local = "\(host)".split(separator: "%").first.map(String.init) ?? "\(host)"
+        if local == boundHost { return true }
+        return ["127.0.0.1", "::1"].contains(local)
     }
 
     private func receiveLoop(_ conn: NWConnection, buffer: Data) {
