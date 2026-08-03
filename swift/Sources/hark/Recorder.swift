@@ -49,6 +49,16 @@ public final class Recorder {
     /// Permission must already be granted. Throws on a device failure before
     /// the engine starts.
     public func start() throws {
+        // Reset per-capture state. Recorder is long-lived and both of these
+        // are instance properties, so without this every capture appends to
+        // all previous audio: capture 2 transcribes 1+2, capture 3 transcribes
+        // 1+2+3, and the WAV grows without bound. Presents as the transcript
+        // repeating what you said last time.
+        queue.sync {
+            samples.removeAll(keepingCapacity: true)
+            peak = 0
+        }
+
         let input = engine.inputNode
         let inFormat = input.inputFormat(forBus: 0)
         guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else {

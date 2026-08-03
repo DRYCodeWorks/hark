@@ -62,7 +62,7 @@ public final class AgentController: NSObject {
         hotkey.onPress = { [weak self] in self?.beginCapture() }
         hotkey.onRelease = { [weak self] in self?.endCapture() }
         if !hotkey.register() {
-            alert("hark: Accessibility is NOT granted. The hotkey (Ctrl+Alt+Space) cannot work until you enable it.")
+            alert("hark: could not bind Ctrl+Alt+Space — something else is probably holding it.")
         }
 
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
@@ -221,6 +221,14 @@ public final class AgentController: NSObject {
 
     private func showRecordingIndicator(_ on: Bool) {
         statusItem?.button?.title = on ? "●" : "hark"
+        // The menu bar title alone is easy to miss on a crowded bar, and it is
+        // the only signal that the mic is actually open. nil duration: cleared
+        // when capture really ends, never on a timer.
+        if on {
+            Overlay.shared.show("● Recording…", duration: nil)
+        } else {
+            Overlay.shared.hide()
+        }
     }
 
     private func setupMenuBar() {
@@ -236,10 +244,21 @@ public final class AgentController: NSObject {
 
     private func alert(_ message: String) {
         log.info(message)
-        NSWorkspace.shared.notificationCenter.post(name: .init("HarkAlert"), object: message)
+        // Was posted to an NSWorkspace notification nobody observed, which
+        // discarded the whole diagnostic surface. Show it, and beep: if
+        // dictation does nothing the instinct is to try again, and a second
+        // silent failure reads as a broken mic rather than a stale key.
+        Overlay.beep()
+        Overlay.shared.show(message, duration: 7)
         NSSound(named: "Basso")?.play()
     }
-    private func brief(_ message: String) { _ = message }
+    /// Short, non-error feedback — "heard nothing", "paste withheld". Was a
+    /// no-op, so the two states a user is most likely to hit and misread as a
+    /// hang produced no feedback at all. No beep: neither is a failure.
+    private func brief(_ message: String) {
+        log.info(message)
+        Overlay.shared.show(message, duration: 2)
+    }
 
     private func present(_ error: DictateError) -> String {
         switch error {
@@ -305,7 +324,7 @@ public final class AgentController: NSObject {
     private func writeHeartbeat() {
         let heartbeat = Heartbeat.current(microphone: microphoneStatus() == .authorized ? "authorized" : "denied",
                                           accessibility: accessibilityTrusted() ? "trusted" : "not_trusted",
-                                          hotkey: "registered")
+                                          hotkey: hotkey.isRegistered ? "registered" : "not_registered")
         heartbeat.write()
     }
 }
