@@ -42,6 +42,7 @@ APP_DST="$APP_DIR/hark.app"
 HARK_CONFIG_DIR="$HOME/.config/hark"
 CLIENT_CONFIG="$HARK_CONFIG_DIR/client.json"
 MIC_STATUS="$HARK_CONFIG_DIR/agent-mic-status"
+ACCESSIBILITY_STATUS="$HARK_CONFIG_DIR/agent-accessibility-status"
 SERVER_KEY="$HARK_CONFIG_DIR/key"
 
 LEGACY_CONFIG="$HOME/.hammerspoon/hark-config.lua"
@@ -306,27 +307,34 @@ check_mic() {
   esac
 }
 
-# Accessibility is queried directly rather than through a status file: unlike
-# the microphone, the answer does not depend on which process asks. The agent
-# needs it to synthesize Cmd+V — without it, recording and transcription both
-# work and nothing ever appears.
+# Reads what the agent's own AXIsProcessTrusted() call recorded — NOT TCC.db.
+#
+# This check used to query TCC.db directly and it produced a confident FALSE
+# PASS on 2026-08-03: it reported "Accessibility is granted" while the agent
+# was simultaneously alerting on screen that it could not paste. The row in
+# TCC.db outlives the grant it describes. An ad-hoc signature's designated
+# requirement is a bare `cdhash`, so every rebuild is a new identity — the old
+# row survives with auth_value=2, System Settings keeps drawing a switched-ON
+# toggle, and the running binary is trusted by nobody.
+#
+# So the same rule as the microphone applies for the same underlying reason:
+# only the process can answer for the process. Reading TCC.db also required
+# Full Disk Access, which this script does not necessarily have.
 check_accessibility() {
-  local db="/Library/Application Support/com.apple.TCC/TCC.db"
-  if [[ ! -r "$db" ]]; then
-    # Expected: the system TCC database is not world-readable, and reading it
-    # needs Full Disk Access. Not a failure — say so rather than reporting a
-    # permission we cannot see as missing.
-    printf '  \033[1;33mSKIP\033[0m  Accessibility (cannot read TCC.db without Full Disk Access)\n'
-    printf '        check by hand: System Settings -> Privacy & Security -> Accessibility -> hark\n'
+  local status_file="$ACCESSIBILITY_STATUS"
+  if [[ ! -f "$status_file" ]]; then
+    # An agent older than this check, or one that has not started yet. Not a
+    # failure, and deliberately not a PASS either.
+    printf '  \033[1;33mSKIP\033[0m  Accessibility (the agent has not reported yet)\n'
+    printf '        if dictation records but nothing pastes, that is this permission:\n'
+    printf '        System Settings -> Privacy & Security -> Accessibility -> hark\n'
     return 0
   fi
-  if sqlite3 "$db" \
-    "select 1 from access where service='kTCCServiceAccessibility' and client='$AGENT_LABEL' and auth_value>0" \
-    2>/dev/null | grep -q 1; then
-    doctor_pass "Accessibility is granted to hark"
+  if [[ "$(sed -n '1p' "$status_file")" == "ok" ]]; then
+    doctor_pass "Accessibility is granted (agent reported at $(sed -n '2p' "$status_file"))"
   else
     doctor_fail "Accessibility is granted to hark" \
-      "System Settings -> Privacy & Security -> Accessibility -> turn ON hark"
+      "System Settings -> Privacy & Security -> Accessibility -> turn ON hark, then restart the agent"
   fi
 }
 

@@ -78,6 +78,22 @@ let logPath = home.appendingPathComponent("Library/Logs/hark-agent.log")
 //   3: optional single-line detail
 let micStatusPath = home.appendingPathComponent(".config/hark/agent-mic-status")
 
+// Same contract, same reason, for Accessibility — and it exists because
+// reading TCC.db instead produced a confident FALSE PASS on 2026-08-03.
+//
+// The row in TCC.db outlives the grant it describes. An ad-hoc signature's
+// designated requirement is a bare `cdhash`, so every rebuild is a new
+// identity; the old row stays, still reading auth_value=2, still drawing a
+// switched-ON toggle in System Settings, while the running binary is not
+// trusted at all. The doctor reported PASS from that row while the agent was
+// simultaneously alerting that it could not paste.
+//
+// Only the process itself can answer, via AXIsProcessTrusted(). So it writes
+// the answer down, exactly as the microphone probe does. Reading TCC.db also
+// needed Full Disk Access, which the doctor did not necessarily have.
+let accessibilityStatusPath = home.appendingPathComponent(
+    ".config/hark/agent-accessibility-status")
+
 // ============================================================================
 // Logging
 // ============================================================================
@@ -271,10 +287,39 @@ func paste(_ text: String) {
     down.flags = .maskCommand
     up.flags = .maskCommand
 
+    // Recorded so a failure to paste names its own cause. Everything up to
+    // here succeeds and logs "pasting N chars" whether or not the keystroke
+    // is ever delivered, so without this an untrusted process is
+    // indistinguishable from a dropped event.
+    // Re-checked and re-recorded at paste time, not just at launch. The grant
+    // can be revoked, or silently invalidated by a rebuild, while the process
+    // keeps running - and this is the moment it actually matters.
+    let trusted = AXIsProcessTrusted()
+    writeAccessibilityStatus(trusted)
+    if !trusted {
+        failAlert(
+            "hark: Accessibility is not granted, so the transcript cannot be pasted.\n"
+                + "It IS on the clipboard — press Cmd+V.\n"
+                + "System Settings -> Privacy & Security -> Accessibility -> turn ON hark."
+        )
+        return
+    }
+
     // NEVER follow this with Return. The user reviews the transcript before
     // submitting it; auto-submit is a hard non-goal (see the design spec).
     down.post(tap: .cghidEventTap)
-    up.post(tap: .cghidEventTap)
+
+    // HOLD THE KEY. Posting key-up immediately after key-down produces a
+    // zero-duration keystroke that many apps silently drop - the events are
+    // delivered, nothing acts on them, and the transcript just never appears.
+    // hs.eventtap.keyStroke, the implementation this replaces, holds for
+    // 200 ms (`local keyDelay = 200000` then usleep between down and up), and
+    // that is the only difference between the two once the flags and the
+    // event tap match. Async rather than a sleep so the overlay's own timers
+    // are not stalled behind it.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+        up.post(tap: .cghidEventTap)
+    }
 }
 
 // ============================================================================
@@ -578,9 +623,18 @@ func registerHotKey() -> Bool {
 // trigger the system prompt - the app is the thing being granted, so it is
 // allowed to ask.
 
+func writeAccessibilityStatus(_ trusted: Bool) {
+    try? FileManager.default.createDirectory(
+        at: accessibilityStatusPath.deletingLastPathComponent(), withIntermediateDirectories: true
+    )
+    let body = "\(trusted ? "ok" : "denied")\n\(timestampFormatter.string(from: Date()))\n"
+    try? body.write(to: accessibilityStatusPath, atomically: true, encoding: .utf8)
+}
+
 func checkAccessibility() {
     let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
     let trusted = AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
+    writeAccessibilityStatus(trusted)
     guard !trusted else { return }
 
     alert(

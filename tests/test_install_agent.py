@@ -306,6 +306,66 @@ class TestMicDoctor:
         assert "PASS" not in out
 
 
+class TestAccessibilityDoctor:
+    """This check produced a confident FALSE PASS on 2026-08-03.
+
+    It queried TCC.db and reported "Accessibility is granted" while the agent
+    was simultaneously alerting on screen that it could not paste. The row
+    outlives the grant it describes: an ad-hoc signature's designated
+    requirement is a bare cdhash, so every rebuild is a new identity, and the
+    stale row keeps auth_value=2 while System Settings keeps drawing a
+    switched-ON toggle for a binary nobody trusts.
+    """
+
+    def _status(self, home: Path, body: str) -> None:
+        d = home / ".config/hark"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "agent-accessibility-status").write_text(body)
+
+    def test_never_reads_tcc_db(self):
+        # The bug was structural, not a typo. Reading that file at all is the
+        # defect, so it is the file's presence that is asserted against.
+        # The comment block still explains what TCC.db is and why it is wrong,
+        # so the string itself must stay legal. What must not survive is the
+        # mechanism: a query, and the service name it would query for.
+        text = SCRIPT.read_text()
+        assert "sqlite3" not in text
+        assert "kTCCServiceAccessibility" not in text
+
+    def test_ok_passes(self, tmp_path):
+        self._status(tmp_path, "ok\n2026-08-03 15:32:00\n")
+        rc, out = run_sourced("check_accessibility", {"HOME": str(tmp_path)})
+        assert rc == 0, out
+        assert "PASS" in out
+
+    def test_denied_is_not_a_pass(self, tmp_path):
+        self._status(tmp_path, "denied\n2026-08-03 15:28:00\n")
+        rc, out = run_sourced("check_accessibility", {"HOME": str(tmp_path)})
+        assert "FAIL" in out
+        assert "PASS" not in out
+
+    def test_a_missing_report_is_not_a_pass(self, tmp_path):
+        # An agent that predates this check, or has not started. Reporting
+        # PASS here is exactly the failure being fixed.
+        rc, out = run_sourced("check_accessibility", {"HOME": str(tmp_path)})
+        assert "PASS" not in out
+        assert "SKIP" in out
+
+
+def test_the_agent_reports_its_own_trust_state(source):
+    # Only the process can answer for the process — the same rule the
+    # microphone probe already followed, arrived at the expensive way.
+    assert "writeAccessibilityStatus" in source
+    assert "agent-accessibility-status" in source
+
+
+def test_trust_is_rechecked_at_paste_time_not_only_at_launch(source):
+    # A grant can be revoked, or silently invalidated by a rebuild, while the
+    # process keeps running. Paste is the moment it matters.
+    paste_body = source[source.index("func paste(") : source.index("// HTTP")]
+    assert "AXIsProcessTrusted()" in paste_body
+
+
 def test_agent_loaded_survives_the_pipefail_sigpipe_trap(tmp_path):
     """`launchctl list | grep -q X` under pipefail reports everything unloaded.
 
