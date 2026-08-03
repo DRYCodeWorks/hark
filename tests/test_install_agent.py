@@ -352,6 +352,67 @@ class TestAccessibilityDoctor:
         assert "SKIP" in out
 
 
+class TestStaleGrantReset:
+    """A rebuild invalidates the Accessibility grant but not its TCC row.
+
+    Observed twice on 2026-08-03: cdhash 6836bec4… -> be5a5c92… left the row
+    reading auth_value=2 with System Settings still drawing a switched-ON
+    toggle, while the agent reported `denied`. The installer clears it so the
+    user is asked again instead of finding a permission already "granted".
+    """
+
+    def _stub_codesign(self, tmp_path: Path, cdhash: str) -> str:
+        import os
+
+        stub = tmp_path / "bin"
+        stub.mkdir(exist_ok=True)
+        (stub / "codesign").write_text(f"#!/bin/sh\necho 'CDHash={cdhash}' >&2\n")
+        (stub / "codesign").chmod(0o755)
+        # Never actually reset a real grant from the suite.
+        (stub / "tccutil").write_text("#!/bin/sh\nexit 0\n")
+        (stub / "tccutil").chmod(0o755)
+        return f"{stub}:{os.environ['PATH']}"
+
+    def test_first_install_records_the_hash_and_resets_nothing(self, tmp_path):
+        path = self._stub_codesign(tmp_path, "aaaa1111")
+        rc, out = run_sourced(
+            "reset_stale_grants_on_identity_change",
+            {"HOME": str(tmp_path), "PATH": path},
+        )
+        assert rc == 0, out
+        assert "binary changed" not in out
+        assert (tmp_path / ".config/hark/.agent-cdhash").read_text() == "aaaa1111"
+
+    def test_reinstalling_the_same_binary_does_not_reset(self, tmp_path):
+        # Re-running the installer on an unchanged build must not cost the
+        # user a consent dialog.
+        path = self._stub_codesign(tmp_path, "aaaa1111")
+        env = {"HOME": str(tmp_path), "PATH": path}
+        run_sourced("reset_stale_grants_on_identity_change", env)
+        rc, out = run_sourced("reset_stale_grants_on_identity_change", env)
+        assert rc == 0, out
+        assert "binary changed" not in out
+
+    def test_a_changed_binary_clears_the_stale_grant(self, tmp_path):
+        env_a = {"HOME": str(tmp_path), "PATH": self._stub_codesign(tmp_path, "aaaa1111")}
+        run_sourced("reset_stale_grants_on_identity_change", env_a)
+        env_b = {"HOME": str(tmp_path), "PATH": self._stub_codesign(tmp_path, "bbbb2222")}
+        rc, out = run_sourced("reset_stale_grants_on_identity_change", env_b)
+        assert rc == 0, out
+        assert "binary changed" in out
+        assert (tmp_path / ".config/hark/.agent-cdhash").read_text() == "bbbb2222"
+
+    def test_only_accessibility_is_reset(self):
+        # The microphone path already tells the truth: the agent's probe runs
+        # rec and reports the outcome, so a stale mic row cannot produce a
+        # false PASS. Resetting it would cost a dialog for nothing.
+        body = SCRIPT.read_text()
+        body = body[body.index("reset_stale_grants_on_identity_change() {") :]
+        body = body[: body.index("\n}\n")]
+        assert "tccutil reset Accessibility" in body
+        assert "tccutil reset Microphone" not in body
+
+
 def test_the_agent_reports_its_own_trust_state(source):
     # Only the process can answer for the process — the same rule the
     # microphone probe already followed, arrived at the expensive way.

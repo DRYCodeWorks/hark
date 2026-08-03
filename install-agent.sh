@@ -43,6 +43,9 @@ HARK_CONFIG_DIR="$HOME/.config/hark"
 CLIENT_CONFIG="$HARK_CONFIG_DIR/client.json"
 MIC_STATUS="$HARK_CONFIG_DIR/agent-mic-status"
 ACCESSIBILITY_STATUS="$HARK_CONFIG_DIR/agent-accessibility-status"
+# The code identity the last install was granted against. See
+# reset_stale_grants_on_identity_change().
+INSTALLED_CDHASH="$HARK_CONFIG_DIR/.agent-cdhash"
 SERVER_KEY="$HARK_CONFIG_DIR/key"
 
 LEGACY_CONFIG="$HOME/.hammerspoon/hark-config.lua"
@@ -147,6 +150,58 @@ resolve_config() {
 
   write_client_config "$server" "$key"
   log "wrote $CLIENT_CONFIG (600) — server: $server"
+}
+
+# ==============================================================================
+# Stale TCC grants
+# ==============================================================================
+#
+# An ad-hoc signature's designated requirement is a bare content hash:
+#
+#   designated => cdhash H"6836bec46e8c7d394cf1ba94421ff18a31674867"
+#
+# so every rebuild is a new code identity and the Accessibility grant stops
+# applying. What macOS does NOT do is tidy up: the old row survives with
+# auth_value=2 and System Settings keeps drawing a switched-ON toggle for a
+# binary nothing trusts. Observed twice on 2026-08-03, and it is genuinely
+# misleading - you go to grant the permission, find it already granted, and
+# conclude the problem is somewhere else.
+#
+# Toggling it off and on by hand works. So does this, without the detour.
+#
+# Only Accessibility is reset, for two reasons. It is the grant observed to
+# break on rebuild, and the microphone path already tells the truth on its own:
+# the agent's probe actually runs rec and reports what happened, so a stale
+# microphone row cannot produce a false PASS the way a stale Accessibility row
+# did. Resetting it anyway would cost a consent dialog for nothing.
+#
+# A Developer ID signature makes this whole function dead code, because the
+# requirement becomes the certificate rather than the hash.
+current_cdhash() {
+  codesign -dvvv "$APP_DST" 2>&1 | sed -n 's/^CDHash=//p' | head -1
+}
+
+reset_stale_grants_on_identity_change() {
+  local new_hash old_hash=""
+  new_hash="$(current_cdhash)"
+  [[ -n "$new_hash" ]] || return 0
+  [[ -f "$INSTALLED_CDHASH" ]] && old_hash="$(cat "$INSTALLED_CDHASH")"
+
+  mkdir -p "$HARK_CONFIG_DIR"
+  printf '%s' "$new_hash" > "$INSTALLED_CDHASH"
+
+  # First install, or the same binary reinstalled: nothing to invalidate.
+  [[ -n "$old_hash" && "$old_hash" != "$new_hash" ]] || return 0
+
+  warn "the agent binary changed (${old_hash:0:12}… -> ${new_hash:0:12}…)."
+  warn "Ad-hoc signing ties TCC grants to that hash, so the Accessibility grant"
+  warn "no longer applies — and macOS would still show its toggle switched ON."
+  if tccutil reset Accessibility "$AGENT_LABEL" >/dev/null 2>&1; then
+    warn "Cleared the stale entry. You will be asked to grant it again."
+  else
+    warn "Could not clear it automatically. Toggle hark OFF and back ON in"
+    warn "System Settings -> Privacy & Security -> Accessibility."
+  fi
 }
 
 # ==============================================================================
@@ -425,6 +480,11 @@ mkdir -p "$APP_DIR"
 # unexplained TCC re-prompt.
 rm -rf "$APP_DST"
 cp -R "$APP_SRC" "$APP_DST"
+
+# Must run AFTER the copy (it hashes the installed bundle) and BEFORE the agent
+# restarts, so the agent's prompt lands on a cleared entry rather than a stale
+# one that claims to be granted already.
+reset_stale_grants_on_identity_change
 
 resolve_config
 
