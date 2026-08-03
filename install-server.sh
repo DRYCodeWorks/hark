@@ -238,7 +238,7 @@ fi
 # ==============================================================================
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  err "hark is macOS-only (launchd, AVAudioEngine, Hammerspoon, TCC)."
+  err "hark is macOS-only (launchd, AVAudioEngine, TCC)."
   exit 1
 fi
 

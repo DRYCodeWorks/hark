@@ -38,20 +38,6 @@ jobs:
       - name: pytest
         run: uv run --locked pytest -q
 
-      - name: Install Lua
-        run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install lua
-          else
-            sudo apt-get update && sudo apt-get install -y lua5.4
-            sudo ln -sf "$(command -v lua5.4)" /usr/local/bin/lua
-          fi
-
-      # The client-side suite. It has never been wired into anything, so it
-      # only ran when someone remembered it existed.
-      - name: Lua client tests
-        run: lua tests/test_client_record.lua
-
   shellcheck:
     runs-on: ubuntu-latest
     steps:
@@ -60,8 +46,7 @@ jobs:
       # Preinstalled on the Ubuntu runner image.
       - name: shellcheck
         run: |
-          shellcheck install-server.sh install-client.sh install-agent.sh \
-                     client/agent/build-agent.sh
+          shellcheck install-server.sh install-client.sh client/agent/build-agent.sh
 
   # The agent is macOS-only and needs a real Swift toolchain, so this cannot
   # join the portable matrix above. It builds the bundle and asserts the

@@ -1,4 +1,4 @@
-"""Guard install-agent.sh and the agent bundle's metadata.
+"""Guard install-client.sh and the agent bundle's metadata.
 
 The agent's failure modes are almost all silent. A missing Info.plist key
 kills the process the moment it opens the microphone; a wrong bundle
@@ -6,7 +6,7 @@ identifier orphans every TCC grant with the toggle still showing ON; a doctor
 that reports a denied microphone as PASS sends the user looking somewhere
 else entirely. None of those announce themselves, so they get asserted here.
 
-The scripted checks are exercised by sourcing install-agent.sh, which stops at
+The scripted checks are exercised by sourcing install-client.sh, which stops at
 its source guard with every function defined and nothing installed.
 """
 
@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPT = REPO / "install-agent.sh"
+SCRIPT = REPO / "install-client.sh"
 INFO_PLIST = REPO / "client" / "agent" / "Info.plist"
 AGENT_SWIFT = REPO / "client" / "agent" / "hark-agent.swift"
 BUILD_SCRIPT = REPO / "client" / "agent" / "build-agent.sh"
@@ -35,7 +35,7 @@ macos_only = pytest.mark.skipif(
 
 
 def run_sourced(body: str, env_overrides: dict[str, str] | None = None) -> tuple[int, str]:
-    """Source install-agent.sh, then run `body` with its functions available."""
+    """Source install-client.sh, then run `body` with its functions available."""
     script = f'set -uo pipefail\nsource "{SCRIPT}"\n{body}\n'
     proc = subprocess.run(
         ["bash", "-c", script],
@@ -146,15 +146,17 @@ class TestEntitlements:
         assert "--options runtime" in BUILD_SCRIPT.read_text()
 
 
-def test_rec_permission_help_does_not_name_a_single_app():
-    # rec is spawned by both clients and TCC attributes the grant to whichever
-    # is responsible, so the row to enable reads "Hammerspoon" under the Lua
-    # client and "hark" under the agent. Naming one sends half the users
-    # looking for a row that was never going to be there.
+def test_rec_permission_help_names_the_responsible_app():
+    # TCC attributes the grant to the RESPONSIBLE process, not to rec, so the
+    # row a user has to switch on is named after whatever spawned it. hark is
+    # now the only thing that does, so naming it is finally correct — while
+    # the Hammerspoon client still shipped, this string named neither, because
+    # the right answer depended on which client you were running.
     rec = (REPO / "client" / "rec.swift").read_text()
     start = rec.index("let permissionHelp")
     help_text = rec[start : rec.index("\n\n", start)]
-    assert "hark" in help_text and "Hammerspoon" in help_text
+    assert "hark" in help_text
+    assert "Hammerspoon" not in help_text
 
 
 def test_launchagent_label_matches_the_bundle_id():
@@ -350,6 +352,96 @@ class TestAccessibilityDoctor:
         rc, out = run_sourced("check_accessibility", {"HOME": str(tmp_path)})
         assert "PASS" not in out
         assert "SKIP" in out
+
+
+class TestHammerspoonIsGone:
+    """The Lua client is deleted, not merely unused.
+
+    The point of issue #2 was never the 505 lines — it was that Accessibility
+    was granted to a general-purpose scriptable runtime whose config was a
+    symlink into this repo, so a `git pull` changed what that grant covered.
+    Leaving the files behind would leave that path installable.
+    """
+
+    def test_the_lua_client_is_deleted(self):
+        assert not (REPO / "client" / "init.lua").exists()
+        assert not (REPO / "client" / "hark-config.example.lua").exists()
+        assert not (REPO / "tests" / "test_client_record.lua").exists()
+
+    def test_ci_no_longer_installs_lua(self):
+        ci = (REPO / ".github" / "workflows" / "ci.yml").read_text()
+        assert "lua" not in ci.lower()
+
+    def test_ci_shellchecks_the_scripts_that_exist(self):
+        ci = (REPO / ".github" / "workflows" / "ci.yml").read_text()
+        assert "install-agent.sh" not in ci
+        assert "install-client.sh" in ci
+        assert "client/agent/build-agent.sh" in ci
+
+    def test_the_installer_still_migrates_an_existing_lua_config(self):
+        # Deleting the client must not strand anyone mid-upgrade: the old
+        # config is still the only place their key lives.
+        assert "hark-config.lua" in SCRIPT.read_text()
+
+
+class TestSshKeyFetch:
+    """Two-machine setups need the key from the other Mac.
+
+    The old Hammerspoon installer did this and the agent installer did not, so
+    it had to come across before the old one could be deleted — otherwise a
+    laptop install regresses to "copy this file by hand".
+    """
+
+    def test_a_bare_argument_is_taken_as_the_ssh_host(self):
+        body = SCRIPT.read_text()
+        assert 'SERVER_HOST="$arg"' in body
+
+    def test_the_url_is_not_derived_from_the_ssh_host(self, tmp_path):
+        # An alias that works for `ssh <host>` is not necessarily an address
+        # curl can reach. Guessing is how a config looks healthy while the
+        # client silently fails, so a mismatch is warned about, not "fixed".
+        body = SCRIPT.read_text()
+        fn = body[body.index("fetch_key_over_ssh() {") :]
+        fn = fn[: fn.index("\n}\n")]
+        assert "DEFAULT_SERVER" not in fn
+
+    def test_non_interactive_does_not_block_on_a_prompt(self, tmp_path):
+        # A piped or CI install must fail with a message, not hang forever on
+        # a `read` nobody can answer.
+        rc, out = run_sourced(
+            "fetch_key_over_ssh </dev/null && echo GOT || echo FAILED",
+            {"HOME": str(tmp_path)},
+        )
+        assert "FAILED" in out, out
+
+    def test_no_key_anywhere_still_fails_loudly(self, tmp_path):
+        rc, out = run_sourced("resolve_config </dev/null", {"HOME": str(tmp_path)})
+        assert rc != 0
+        assert "no shared secret" in out
+        assert not (tmp_path / ".config/hark/client.json").exists()
+
+
+class TestHealthDoctor:
+    """Everything local can be healthy while the server is simply unreachable.
+
+    From the user's chair that is indistinguishable from a microphone fault:
+    hold the key, speak, nothing appears.
+    """
+
+    def test_missing_server_url_is_not_a_pass(self, tmp_path):
+        rc, out = run_sourced("check_health", {"HOME": str(tmp_path)})
+        assert "PASS" not in out
+        assert "FAIL" in out
+
+    def test_an_unreachable_server_fails(self, tmp_path):
+        rc, _ = run_sourced(
+            'write_client_config "http://127.0.0.1:9/dictate" "k"', {"HOME": str(tmp_path)}
+        )
+        assert rc == 0
+        # Port 9 (discard) refuses fast, so this does not hang on the timeout.
+        rc, out = run_sourced("check_health", {"HOME": str(tmp_path)})
+        assert "FAIL" in out
+        assert "/health" in out
 
 
 class TestStaleGrantReset:

@@ -2,14 +2,14 @@
 //
 //  usage: rec <output.wav> [max-seconds]
 //
-//  Runs until SIGTERM (the dictate client sends it on key-up), or until
+//  Runs until SIGTERM (hark-agent sends it on key-up), or until
 //  max-seconds if given. Exits 0 having written a finalized WAV, or non-zero
 //  with a one-line reason on stderr. No file is left behind on failure.
 //
 //    0  a finalized WAV containing audio
 //    1  something else went wrong (the reason is on stderr)
 //    2  bad usage
-//    3  TCC has not granted microphone access - client/init.lua keys on this
+//    3  TCC has not granted microphone access - hark-agent keys on this
 //       exact code to tell a permission problem from every other failure
 //    4  the default input device has no usable input stream (0 ch or 0 Hz)
 //    5  the device delivered no audio at all
@@ -59,20 +59,21 @@ let maxSeconds = args.count >= 3 ? Double(args[2]) : nil
 // So a frame count can never see a denial - and neither can the sample-rate
 // guard below, because format negotiation succeeds under denial too. The only
 // way to learn the answer is to ask TCC for it.
-// Deliberately does NOT name the app to enable. rec is spawned by both
-// clients, and TCC attributes the grant to whichever is RESPONSIBLE - so the
-// row to switch on says "Hammerspoon" under the Lua client and "hark" under
-// the native agent. Naming one sent users to look for a row that was never
-// going to be there.
+
+// Names hark, because hark is now the only thing that spawns rec. TCC
+// attributes the grant to the RESPONSIBLE process rather than to rec itself,
+// so this is the row that actually exists in the pane. While the Hammerspoon
+// client still shipped, that row was named after Hammerspoon and this string
+// deliberately named neither.
 let permissionHelp = "System Settings -> Privacy & Security -> Microphone "
-    + "-> turn on the app that launched this (hark, or Hammerspoon)"
+    + "-> turn hark ON"
 
 switch AVCaptureDevice.authorizationStatus(for: .audio) {
 case .authorized:
     break
 case .notDetermined:
-    // Nobody has asked yet, and Hammerspoon is not listed under Microphone
-    // until something does - so failing outright here would leave the user no
+    // Nobody has asked yet, and hark is not listed under Microphone until
+    // something does - so failing outright here would leave the user no
     // toggle to flip. Ask, and wait for the answer; continuing without one
     // would record the substituted silence.
     //
