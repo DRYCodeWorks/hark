@@ -399,7 +399,10 @@ class TestTransportPolicy:
         assert rc == 0, out
         written = json.loads((tmp_path / ".config/hark/client.json").read_text())
         assert written["allowPlaintext"] is True
-        assert "unencrypted" in out, "the plaintext choice should be stated, not silent"
+        assert "allowPlaintext" in out, "the choice should be stated, not silent"
+        # The warning must not overclaim: on a tailnet WireGuard already
+        # encrypts the hop, so "in the clear on the wire" is wrong.
+        assert "unencrypted" not in out
 
     def test_loopback_needs_no_opt_in(self, tmp_path):
         import json

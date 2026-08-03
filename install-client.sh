@@ -135,8 +135,13 @@ write_client_config() {
     # A numeric IP on a tailnet is a defensible place for plaintext, but it
     # should be a stated decision rather than a silent default.
     plaintext="true"
-    warn "audio and transcripts will cross the network unencrypted to ${host}."
-    warn "On a tailnet that is defensible; recording it as allowPlaintext."
+    warn "no TLS to ${host} — recording it as allowPlaintext."
+    warn "On a tailnet this is narrower than it sounds: WireGuard already"
+    warn "encrypts the traffic between your machines, so this is 'no TLS"
+    warn "inside an encrypted tunnel', not 'in the clear on the wire'. It"
+    warn "still means the server is not authenticated to the client."
+    warn "For real TLS: tailscale cert <magicdns-name>, serve it, and point"
+    warn "\"server\" at https://<magicdns-name> — no opt-in needed then."
   fi
 
   mkdir -p "$HARK_CONFIG_DIR"
