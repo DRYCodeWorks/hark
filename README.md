@@ -12,8 +12,8 @@ the clipboard and is pasted at the cursor.
 Transcription is local (whisper.cpp, model held resident). Audio never leaves
 your hardware — there is no cloud ASR and no account.
 
-macOS only, by construction: it is built out of launchd, AVAudioEngine,
-Hammerspoon, and macOS's TCC permission model.
+macOS only, by construction: it is built out of launchd, AVAudioEngine, Carbon
+hotkeys, and macOS's TCC permission model.
 
 ## Why off-the-shelf dictation apps can't do this
 
@@ -133,28 +133,61 @@ The shared secret lives at `~/.config/hark/key` (mode 600), outside the repo.
 ./install-client.sh
 ```
 
+For a two-machine setup, pass the server's SSH host to skip the prompt:
+
+```bash
+./install-client.sh dans-mac-studio
+```
+
 It:
 
-1. installs `hammerspoon` (cask) via Homebrew if missing, and compiles
-   `client/rec.swift` to `~/.hammerspoon/rec` with `swiftc`,
+1. builds `swift/` into `~/Applications/Hark.app` with SwiftPM and signs it,
 2. obtains the shared secret (locally, or over SSH for a two-machine setup),
 3. asks you nothing about microphones — `rec` records the system default
    input, chosen in System Settings → Sound → Input,
-4. curls `/health` and tells you plainly if the server isn't reachable,
-5. writes `~/.hammerspoon/hark-config.lua` (mode 600 — it holds the secret
-   in plaintext) and links `client/init.lua` to `~/.hammerspoon/init.lua`. If
-   that path already exists as a real file rather than a symlink, this is a
-   **hard stop** with the exact command to fix it, not a warning you can miss,
-6. **actually starts Hammerspoon with the new config loaded** — launching it
-   if it wasn't running, quitting and relaunching if it was. Hammerspoon does
-   not auto-reload its config, and installing a cask does not run the app.
-   This step being missing was once the entire cause of "holding the hotkey
-   does nothing at all",
-7. handles the two permissions below,
-8. finishes by running the same live checks as `--doctor` and refuses to print
+4. writes `~/.config/hark/client.json` (mode 600 — it holds the secret in
+   plaintext),
+5. registers `hark agent` as the LaunchAgent `com.drycodeworks.hark-agent`, so
+   it starts at login and comes back after a reboot,
+6. waits for the agent's own microphone probe, which is what triggers the
+   consent dialog,
+7. finishes by running the same live checks as `--doctor` and refuses to print
    "setup complete" if any fail.
 
 Safe to re-run at any time; every step checks current state first.
+
+#### Upgrading from the Hammerspoon client
+
+Before 2026-08-03 the client was Hammerspoon plus 505 lines of Lua. That meant
+Accessibility — permission to observe every keystroke — was granted to a
+general-purpose scriptable runtime whose config was a symlink into this repo,
+so a `git pull` changed what the grant covered without re-prompting. The native
+agent asks for the same permission with far less behind it.
+See [issue #2](https://github.com/DRYCodeWorks/hark/issues/2).
+
+`./install-client.sh` migrates you: `~/.hammerspoon/hark-config.lua` is read
+into `~/.config/hark/client.json` and never modified, and Hammerspoon is quit
+so the agent can take the hotkey (`Ctrl+Alt+Space` is a system-wide
+registration and exactly one process gets it).
+
+Afterwards, clean up by hand — the installer deliberately does not:
+
+```bash
+brew uninstall --cask hammerspoon
+rm ~/.hammerspoon/init.lua
+```
+
+**Revoking Hammerspoon's Accessibility and Microphone grants is the actual
+point of the exercise**, and quitting the app does not do it. Switch it off in
+System Settings → Privacy & Security.
+
+You will be prompted for both permissions again: TCC keys grants to a code
+identity, and the agent is a different one. Until a Developer ID certificate is
+in place the bundle is ad-hoc signed, whose designated requirement is a bare
+`cdhash` — so **every rebuild is a new identity and the grants must be given
+again**. `install-client.sh` detects the change and clears the stale entry for
+you, because macOS otherwise leaves the old row in place with its toggle still
+switched ON for a binary nothing trusts.
 
 ### 3. Configuration
 
@@ -172,53 +205,62 @@ person's noise.
 Read-only — changes nothing, exits non-zero if anything is wrong. Run it any
 time the hotkey stops working, instead of re-running the whole install:
 
-- Hammerspoon.app installed
-- Hammerspoon actually running
-- `~/.hammerspoon/init.lua` is a symlink to this repo's `client/init.lua`
-- `~/.hammerspoon/hark-config.lua` exists, is mode 600, has a non-empty key
-- `rec` is built, and which binary `init.lua` would actually resolve
-- Hammerspoon can reach the microphone — read from
-  `~/.hammerspoon/.hark-mic-status`, the outcome `client/init.lua`'s own
-  startup probe wrote. This is the only reliable signal: `--doctor`
-  deliberately does **not** run its own probe, since that would test the
-  *terminal's* microphone permission rather than Hammerspoon's — a different
-  grant, and a confidently wrong PASS.
+- `Hark.app` is installed, and its signature verifies
+- `~/.config/hark/client.json` exists, is mode 600, has a non-empty key
+- the agent is loaded in launchd and actually running
+- nothing else is holding `Ctrl+Alt+Space`
+- the agent can reach the microphone
+- Accessibility is granted
 - the server's `/health` is reachable
-- the key **actually authenticates** — it POSTs a tiny silent WAV to
-  `/dictate` and checks the response isn't a 401
 
 Each `FAIL` line names its exact fix.
 
-`--doctor` does **not** check Accessibility. Only a real hotkey press confirms
-that one.
+**Every permission check reads what the agent itself reported**, from
+`~/.config/hark/status.json` — which the agent rewrites every 30 s, so a stale
+file means it died without saying so. Nothing is measured from the outside, and
+that is not incidental:
+
+- Running a microphone probe from `--doctor` would test the **terminal's**
+  grant, because TCC attributes to the responsible process. A confidently
+  wrong PASS.
+- Querying `TCC.db` for Accessibility reports what was true for **some earlier
+  build**. The row outlives the grant it describes, so after a rebuild it still
+  reads granted while the running binary is trusted by nothing. This check did
+  exactly that once, printing PASS while the agent was alerting on screen that
+  it could not paste.
+
+Only the process can answer for the process. Everything else is a guess that
+sometimes agrees.
 
 ## Two permissions the installer cannot grant for you
 
-Both need a human click in System Settings — macOS doesn't allow a script to
-flip either — but they work fundamentally differently, and `install-client.sh` handles
-them differently on purpose. These two cost a full debugging session to
+Both need a human click — macOS doesn't allow a script to flip either — and
+they fail in different ways. These cost a full debugging session each to
 understand, so they are worth reading before you hit them.
 
-1. **Accessibility** — needed for the global hotkey and for synthesizing the
-   ⌘V paste. Without it, `hs.hotkey.bind` silently never fires: no error, no
-   console message, nothing. This one **is** pre-grantable — the Accessibility
-   pane has a "+" button and lists every installed app whether or not it has
-   ever run — so `install-client.sh` opens the pane and blocks until you confirm.
+1. **Accessibility** — needed to synthesize the ⌘V paste, *not* for the
+   hotkey (`RegisterEventHotKey` needs no permission). Without it, recording
+   and transcription both succeed and nothing ever appears. The agent checks
+   at startup and again at paste time, and if it is missing it says so and
+   tells you the transcript is on the clipboard.
 
-2. **Microphone** — `rec` runs as Hammerspoon's *child process*, so macOS
-   attributes microphone access to **Hammerspoon**, not to `rec`. This one is
-   **not** pre-grantable: the Microphone pane has **no "+" button**. Unlike
-   Accessibility, it lists only apps that have *already requested* access.
-   Hammerspoon will not appear there — there is nothing to toggle — until
-   something has actually tried to open the mic.
+2. **Microphone** — `rec` runs as the agent's *child process*, so macOS
+   attributes access to **hark**, not to `rec`. This one is **not**
+   pre-grantable: the Microphone pane has **no "+" button**, and lists only
+   apps that have *already requested* access. hark will not appear there —
+   there is nothing to toggle — until something has actually tried to open the
+   mic.
 
-   So permission must be **triggered**, never pre-granted. `client/init.lua`
-   runs a short (~0.4s) `rec` probe on every config load, which is what fires
-   the consent dialog. On success it stays silent and writes `ok` to
-   `~/.hammerspoon/.hark-mic-status`; on failure it shows a long-lived
-   alert, writes `denied`, and logs `rec`'s stderr. Once the probe has run
-   once, Hammerspoon **is** listed in the Microphone pane, so the recovery
-   path works.
+   So permission must be **triggered**, never pre-granted. The agent runs a
+   short (~0.4s) `rec` probe at startup, which is what fires the consent
+   dialog. On success it stays silent and writes `ok`; on failure it alerts,
+   writes `denied`, and logs `rec`'s stderr.
+
+   One trap worth knowing if you fork this: under the hardened runtime, a
+   missing `com.apple.security.device.audio-input` entitlement makes TCC
+   refuse to *prompt at all*. The app then never appears in the pane, and the
+   code sees an instant `.denied` indistinguishable from a real refusal.
+   Nothing but the unified log names the cause.
 
 Then test for real: put your cursor at a shell prompt, hold **Ctrl+Alt+Space —
 all three keys together, not the spacebar alone**, say a short sentence,
@@ -239,9 +281,9 @@ re-render and reload the plists:
 bind = "10.x.x.x"     # never 0.0.0.0
 ```
 
-On the recording machine, point `server` in
-`~/.hammerspoon/hark-config.lua` at the same address. `install-client.sh` will offer
-to fetch the key over SSH.
+On the recording machine, point `server` in `~/.config/hark/client.json` at
+the same address. `install-client.sh` fetches the key over SSH — pass the
+server's SSH host as an argument, or let it prompt.
 
 `whisper.host` stays loopback in both cases and is not configurable. It is the
 component that handles raw audio, and audio should not cross a network even a
@@ -249,22 +291,34 @@ trusted one.
 
 ## Changing the hotkey
 
-Edit the last real line of `client/init.lua`:
+Edit `register()` in `swift/Sources/hark/Hotkey.swift`:
 
-```lua
-hs.hotkey.bind({ "ctrl", "alt" }, "space", startRecording, stopRecording)
+```swift
+RegisterEventHotKey(
+    UInt32(kVK_Space),
+    UInt32(controlKey | optionKey),
+    ...
 ```
 
-Hammerspoon accepts the standard modifier names (`"cmd"`, `"alt"`, `"ctrl"`,
-`"shift"`, `"fn"`) and most key names as lowercase strings. Reload
-Hammerspoon's config after editing (menu bar icon → Reload Config).
+The key is a `kVK_*` virtual keycode from Carbon's `Events.h`; the modifiers
+are `controlKey`, `optionKey`, `cmdKey` and `shiftKey`, OR'd together. Then
+re-run `./install-client.sh`.
 
-Avoid `{"cmd","alt"}` + `"space"` — that's macOS's Finder search shortcut, and
-the system wins that fight before Hammerspoon sees the event.
+`RegisterEventHotKey` rather than a `CGEventTap` is a decision with evidence
+behind it. A tap reconstructs the chord from the modifier flags carried on each
+event, and releasing Ctrl+Alt+Space almost always lifts a modifier at or before
+the space bar — so the key-up arrives with the bits already clear. Measured over
+45 s of ordinary use: **303 key-downs, 1 key-up**. Carbon delivers pressed and
+released as distinct events, does not condition the release on modifier state,
+consumes the chord so it does not also reach the focused app, and needs no
+permission of its own.
 
-The Fn/🌐 key needs a different mechanism entirely (an `hs.eventtap` watching
+Avoid `cmdKey | optionKey` + space — that's macOS's Finder search shortcut, and
+the system wins that fight before `RegisterEventHotKey` sees it.
+
+The Fn/🌐 key needs a different mechanism entirely (a `CGEventTap` watching
 `flagsChanged`, the Input Monitoring permission, and disabling the system's own
-Fn action). It is **not** a drop-in change to the `bind` call above.
+Fn action). It is **not** a drop-in change to the call above.
 
 ## Troubleshooting
 
@@ -272,19 +326,20 @@ Fn action). It is **not** a drop-in change to the `bind` call above.
 happens" reports are one of its checks, not a deeper bug.
 
 0. **Nothing happened, but `--doctor` passes everything.** Check you're
-   pressing **Ctrl+Alt+Space — all three keys together**. Then open the
-   Hammerspoon console (menu bar icon → Console) and look for a Lua error.
-   If Accessibility is missing, the hotkey silently never fires.
-1. **`/tmp/hark.wav` is zero bytes, or the microphone check FAILs.** A
-   microphone permission problem almost every time: System Settings → Privacy
-   & Security → Microphone → Hammerspoon must be ON. If Hammerspoon isn't
-   listed at all, it hasn't asked yet — reload its config to re-run the probe.
+   pressing **Ctrl+Alt+Space — all three keys together**. Then read
+   `~/Library/Logs/hark-agent.log`: if it shows `pasting N chars`, the
+   transcript reached your clipboard and only the paste failed, which is
+   Accessibility.
+1. **Recording produces nothing, or the microphone check FAILs.** A microphone
+   permission problem almost every time: System Settings → Privacy & Security
+   → Microphone → **hark** must be ON. If hark isn't listed at all, it hasn't
+   successfully asked yet — see the entitlement note above.
 2. **A beep and an alert naming an HTTP status.** The alert names the likely
    cause:
-   - **401** — the key in `~/.hammerspoon/hark-config.lua` doesn't match
+   - **401** — the key in `~/.config/hark/client.json` doesn't match
      `~/.config/hark/key` on the server. Re-run `install-client.sh`.
    - **415** — a client bug in the `Content-Type` header; shouldn't happen
-     with an unmodified `init.lua`.
+     with an unmodified agent.
    - **400** — the server rejected the audio; usually the same mic-permission
      issue as #1, caught server-side.
    - **503** — `whisper-server` is down. Check `/tmp/hark-whisper.err`.
@@ -299,19 +354,20 @@ happens" reports are one of its checks, not a deeper bug.
    filtered on the *audio*, not on the text. Speak louder or closer, check the
    input device, and see `SILENCE_RMS_THRESHOLD` below.
 
-**`~/.hammerspoon/hark.log` is the load-bearing diagnostic.** Hammerspoon's
-`print()` reaches only the in-app console, which is not persisted and cannot be
-read out of band — a flake an hour old otherwise leaves zero evidence anywhere.
-`init.lua` appends `rec`'s exit code and stderr to that file on every non-zero
-exit.
+**`/tmp/hark-agent.err` and `~/.config/hark/status.json` are the load-bearing
+diagnostics.** The log carries the byte count of each request and the *length* —
+never the content — of each transcript; `status.json` carries the live
+microphone, Accessibility and hotkey state. A flake an hour old otherwise leaves
+no evidence anywhere.
 
 ## What's been tested, and what hasn't
 
-One person, one pair of Macs, one microphone. CI runs the server suite (67
-pytest), the client suite (8 Lua tests against a stubbed Hammerspoon) and
-shellcheck, on both Linux and macOS. What CI cannot reach is everything the
-permissions model touches — a real microphone, a real TCC grant, a real paste
-into a real window. Specifically worth knowing:
+One person, two Macs, one microphone. CI runs the pytest suite on Linux and
+macOS, shellcheck, and a macOS job that builds `hark.app` and verifies its
+signature. What CI cannot reach is everything the permissions model touches — a
+real microphone, a real TCC grant, a real paste into a real window. Every bug
+found during the agent's first bring-up lived in exactly that gap, and each one
+reported success while being broken. Specifically worth knowing:
 
 **The silence threshold is calibrated against synthetic audio, not a real
 microphone.** `SILENCE_RMS_THRESHOLD = 150.0` sits ~16× above the noise floor
@@ -382,25 +438,27 @@ transient.
 
 ```
 install-server.sh          transcription side: deps, model, plists, services
-install-client.sh          hotkey/mic/paste side, plus --doctor
-client/
-  init.lua                 Hammerspoon client
-  rec.swift                AVAudioEngine recorder, built at install time
-  hark-config.example.lua  shape of ~/.hammerspoon/hark-config.lua
+install-client.sh          builds + installs the agent, plus --doctor
+swift/
+  Sources/hark/            the agent — hotkey, capture, paste, overlay
+  Sources/HarkCore/        config, client, WAV, sanitise, server
+  Packaging/build-app.sh   assembles and signs Hark.app
+  Tests/                   SwiftPM suite (48)
 config.example.toml        shape of ~/.config/hark/config.toml
-src/hark/                  the HTTP service
+src/hark/                  the Python HTTP service (still the one in use)
 launchd/                   plist templates, rendered by hark.plists
-tests/                     pytest suite (67) + test_client_record.lua (8)
-.github/workflows/ci.yml   both suites + shellcheck, on Linux and macOS
-docs/                      design spec + implementation plan
+tests/                     pytest suite
+.github/workflows/ci.yml   pytest + shellcheck + the signed bundle build
+docs/                      design specs
 ```
 
 Run the suites locally the way CI does:
 
 ```bash
 uv run --locked pytest -q
-lua tests/test_client_record.lua
 shellcheck install-server.sh install-client.sh
+cd swift && swift test                 # macOS only
+cd swift && bash Packaging/build-app.sh
 ```
 
 ## License

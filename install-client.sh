@@ -2,795 +2,706 @@
 #
 # hark — client setup.
 #
-# Run this on the Mac you want to dictate FROM. On a single-machine setup
-# that is the same Mac that runs the server; on a two-machine setup it is the
-# laptop, not the transcribing desktop. It:
+# Run this on the Mac you want to dictate FROM. On a single-machine setup that
+# is the same Mac that runs the server; on a two-machine setup it is the
+# laptop, not the transcribing desktop. It builds swift/ into
+# ~/Applications/Hark.app and registers `hark agent` as a LaunchAgent so it
+# starts at login.
 #
-#   1. installs Hammerspoon via Homebrew and builds client/rec.swift
-#   2. reads the shared secret from ~/.config/hark/key if the server runs on
-#      this same Mac; otherwise fetches it from the server over SSH
-#   3. (nothing to pick — rec uses the system default input device)
-#   4. writes ~/.hammerspoon/hark-config.lua (chmod 600 — it holds a secret)
-#   5. links client/init.lua -> ~/.hammerspoon/init.lua (refuses to clobber a
-#      real file there — see the loud error if that happens)
-#   6. actually starts Hammerspoon with the new config loaded (launches it if
-#      it wasn't running; quits + relaunches it if it was, since Hammerspoon
-#      does not auto-reload its config)
-#   7. checks Accessibility permission for Hammerspoon and, if it's missing,
-#      opens the exact System Settings pane and BLOCKS until you confirm
-#      you've granted it. Microphone permission works differently and is NOT
-#      blocked on the same way — see step 8b's comment for why — instead
-#      this waits (up to 30s) for client/init.lua's own startup microphone
-#      probe to report an outcome, which is what actually triggers the
-#      consent dialog
-#   8. runs the same live checks as `--doctor` (below) and refuses to print
-#      "setup complete" if any of them fail
+#   ./install-client.sh                install or update
+#   ./install-client.sh <ssh-host>     skip the "server SSH host" prompt
+#   ./install-client.sh --doctor       read-only diagnosis, changes nothing
+#   ./install-client.sh --uninstall    remove the agent and its LaunchAgent
 #
-# `./install-client.sh --doctor` runs step 8's checks on their own, read-only,
-# changing nothing — useful any time the hotkey isn't working and you want to
-# know exactly which piece is broken, without re-running the whole install.
+# Safe to re-run: every step checks current state first, and the key is always
+# re-read, so this doubles as "resync my key after the server rotated it".
 #
-# Safe to re-run: every step checks current state before acting, and step 2
-# always re-reads the key fresh (so it also doubles as "resync my key after
-# the server rotated it"). Re-running with permissions already granted is
-# fast — the Accessibility check in step 7 only opens System Settings and
-# blocks when it can't confirm the permission is already there, and the
-# microphone probe in step 8b reports "ok" almost immediately once it's
-# already been granted.
+# MIGRATING FROM THE HAMMERSPOON CLIENT
 #
-# This has been run for real, end to end, on one pair of Macs. The paths
-# least likely to have been exercised on yours are the TCC permission
-# prompts, which behave differently depending on what macOS has already
-# granted. `--doctor` is the tool for that: it names the failing boundary
-# rather than leaving you to guess.
+# Until 2026-08-03 the client was Hammerspoon plus 505 lines of Lua, which
+# meant Accessibility was granted to a general-purpose scriptable runtime whose
+# config was a symlink into this repo — so a `git pull` changed what that grant
+# covered without re-prompting. The native agent asks for the same permission
+# with far less behind it. See GitHub issue #2.
+#
+# Two things this still does for anyone crossing that bridge:
+#
+#   - ~/.hammerspoon/hark-config.lua is read into ~/.config/hark/client.json,
+#     if the latter does not exist yet. The old file is never modified.
+#   - Hammerspoon is quit if it is running, because Ctrl+Alt+Space is a
+#     system-wide registration and exactly one process gets it — whichever
+#     starts first wins and the loser reports it could not register. Pass
+#     --keep-hammerspoon to leave it alone.
+#
+# Once you are on the agent: `brew uninstall --cask hammerspoon` and remove
+# ~/.hammerspoon/init.lua. Revoking Hammerspoon's Accessibility and Microphone
+# grants is the actual point of the exercise, and quitting the app does not do
+# it for you.
 
 set -euo pipefail
 
-CONFIG_DIR="$HOME/.hammerspoon"
-CONFIG_FILE="$CONFIG_DIR/hark-config.lua"
-# Must match init.lua's RECORDER_PATH.
-RECORDER_BIN="$CONFIG_DIR/rec"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# This script lives at the repo root; the client sources it installs live in
-# client/. Keep these separate — conflating them silently symlinks
-# ~/.hammerspoon/init.lua to a path that does not exist.
-CLIENT_DIR="$REPO_DIR/client"
-HARK_PORT=8911
-HAMMERSPOON_APP="/Applications/Hammerspoon.app"
-HAMMERSPOON_BUNDLE_ID="org.hammerspoon.Hammerspoon"
+APP_SRC="$REPO_DIR/swift/Packaging/Hark.app"
+APP_DIR="$HOME/Applications"
+APP_DST="$APP_DIR/Hark.app"
+
+HARK_CONFIG_DIR="$HOME/.config/hark"
+CLIENT_CONFIG="$HARK_CONFIG_DIR/client.json"
+STATUS_JSON="$HARK_CONFIG_DIR/status.json"
+# The code identity the last install was granted against. See
+# reset_stale_grants_on_identity_change().
+INSTALLED_CDHASH="$HARK_CONFIG_DIR/.agent-cdhash"
+SERVER_KEY="$HARK_CONFIG_DIR/key"
+
+LEGACY_CONFIG="$HOME/.hammerspoon/hark-config.lua"
+
+LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
+AGENT_LABEL="com.drycodeworks.hark-agent"
+AGENT_PLIST="$LAUNCH_AGENTS/$AGENT_LABEL.plist"
+
+DEFAULT_SERVER="http://127.0.0.1:8911/dictate"
+
+# The server's SSH host, for a two-machine setup. Set by a bare argument or
+# HARK_SERVER_HOST; otherwise prompted for, and only when no key is found
+# locally. Deliberately separate from the server URL — see fetch_key_over_ssh.
+SERVER_HOST="${HARK_SERVER_HOST:-}"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
 err()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; }
 
-# ==============================================================================
-# Diagnostics — shared between `--doctor` and the end of a normal run.
-#
-# Every check_* function prints exactly one PASS/FAIL line (with a remedy on
-# FAIL) and returns 0/1. They never exit the script themselves: callers must
-# use them as an `if`/`!` condition or append `|| true` when calling them as
-# a bare statement, since a bare failing call under `set -e` would otherwise
-# abort the whole script — the same class of bug this script already hit
-# once with ffmpeg's expected-nonzero device-listing exit.
-# ==============================================================================
-
-DOCTOR_FAILURES=0
-
+doctor_failures=0
 doctor_pass() { printf '  \033[1;32mPASS\033[0m  %s\n' "$1"; }
 doctor_fail() {
   printf '  \033[1;31mFAIL\033[0m  %s\n' "$1"
-  printf '        fix: %s\n' "$2"
-  DOCTOR_FAILURES=$((DOCTOR_FAILURES + 1))
+  printf '        \033[1;33mfix:\033[0m %s\n' "$2"
+  doctor_failures=$((doctor_failures + 1))
 }
 
-check_hammerspoon_installed() {
-  if [[ -d "$HAMMERSPOON_APP" ]]; then
-    doctor_pass "Hammerspoon.app installed"
-    return 0
-  fi
-  doctor_fail "Hammerspoon.app installed" "brew install --cask hammerspoon"
-  return 1
-}
+# ==============================================================================
+# Config
+# ==============================================================================
 
-check_hammerspoon_running() {
-  if pgrep -x Hammerspoon >/dev/null 2>&1; then
-    doctor_pass "Hammerspoon is running"
-    return 0
-  fi
-  doctor_fail "Hammerspoon is running" "open -a Hammerspoon   (or re-run ./install-client.sh, which does this for you)"
-  return 1
-}
-
-check_init_symlink() {
-  if [[ -L "$CONFIG_DIR/init.lua" && "$CONFIG_DIR/init.lua" -ef "$CLIENT_DIR/init.lua" ]]; then
-    doctor_pass "${CONFIG_DIR}/init.lua is a symlink to ${CLIENT_DIR}/init.lua"
-    return 0
-  fi
-  doctor_fail "${CONFIG_DIR}/init.lua is a symlink to this repo's client/init.lua" \
-    "ln -sf ${CLIENT_DIR}/init.lua ${CONFIG_DIR}/init.lua   (if it's a real file instead, move it aside first — see README)"
-  return 1
-}
-
-check_config_file() {
-  if [[ ! -f "$CONFIG_FILE" ]]; then
-    doctor_fail "${CONFIG_FILE} exists" "run ./install-client.sh"
-    return 1
-  fi
-
-  local mode
-  mode="$(stat -f '%Lp' "$CONFIG_FILE" 2>/dev/null || true)"
-  if [[ "$mode" != "600" ]]; then
-    doctor_fail "${CONFIG_FILE} is mode 600 (found: ${mode:-unreadable})" "chmod 600 ${CONFIG_FILE}"
-    return 1
-  fi
-
-  if ! grep -qE '^[[:space:]]*key[[:space:]]*=[[:space:]]*"[^"]+"' "$CONFIG_FILE"; then
-    doctor_fail "${CONFIG_FILE} has a non-empty key" "re-run ./install-client.sh"
-    return 1
-  fi
-
-  doctor_pass "${CONFIG_FILE} exists, mode 600, has a key"
-  return 0
-}
-
-# Extracts a quoted field's value from hark-config.lua, e.g. for a line
-# `  server = "http://...",` prints `http://...`. Prints nothing (and
-# returns 1) if the field isn't present.
-config_field() {
+# Extracts a quoted field from the legacy Lua config, e.g. for a line
+# `  server = "http://...",` prints `http://...`.
+legacy_field() {
   local field="$1"
-  if [[ ! -f "$CONFIG_FILE" ]]; then
-    return 1
-  fi
+  [[ -f "$LEGACY_CONFIG" ]] || return 1
   local value
-  value="$(grep -E "^[[:space:]]*${field}[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null \
+  value="$(grep -E "^[[:space:]]*${field}[[:space:]]*=" "$LEGACY_CONFIG" 2>/dev/null \
     | sed -E 's/^[^"]*"([^"]*)".*/\1/' || true)"
-  if [[ -z "$value" ]]; then
-    return 1
-  fi
+  [[ -n "$value" ]] || return 1
   printf '%s' "$value"
 }
 
-# Mirrors init.lua's resolveRecorder(): trust the configured path if it's a
-# real executable, else the default build location.
-resolve_recorder_for_doctor() {
-  local configured
-  configured="$(config_field recorder || true)"
-  if [[ -n "$configured" && -x "$configured" ]]; then
-    printf '%s' "$configured"
-    return 0
-  fi
-  if [[ -x "$RECORDER_BIN" ]]; then
-    printf '%s' "$RECORDER_BIN"
-    return 0
-  fi
-  return 1
+# Reads a string field out of client.json without needing jq. Deliberately
+# narrow: these two fields are written by this script, so the shape is known.
+json_field() {
+  local field="$1"
+  [[ -f "$CLIENT_CONFIG" ]] || return 1
+  local value
+  value="$(grep -E "\"${field}\"[[:space:]]*:" "$CLIENT_CONFIG" 2>/dev/null \
+    | sed -E 's/.*"'"${field}"'"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' || true)"
+  [[ -n "$value" ]] || return 1
+  printf '%s' "$value"
 }
 
-check_recorder() {
-  local resolved
-  resolved="$(resolve_recorder_for_doctor || true)"
-  if [[ -z "$resolved" ]]; then
-    doctor_fail "rec is built" "re-run ./install-client.sh (it compiles client/rec.swift)"
-    return 1
-  fi
-  # Deliberately does NOT run it: rec opens the microphone, and a run from
-  # this shell would test the terminal's TCC grant rather than Hammerspoon's
-  # — the same trap check_mic_permission() below exists to avoid.
-  doctor_pass "rec is built; init.lua would use: ${resolved}"
-  return 0
+# Escapes the two characters that can appear in a key or URL and would break
+# the JSON we emit. Keys are base64-ish and URLs are plain, so this is a
+# guard rather than a general-purpose escaper.
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
-# Reads the outcome client/init.lua's own startup microphone probe wrote to
-# ~/.hammerspoon/.hark-mic-status. This is the ONLY reliable way to learn
-# whether HAMMERSPOON can reach the microphone: TCC grants are attributed to
-# whichever app is responsible for the process that opened the device, and
-# rec runs as Hammerspoon's child — so a probe run from THIS shell script
-# would test the terminal's own microphone grant, a different permission
-# that would produce a confidently wrong PASS. Never run rec from here to
-# "test" this; read the file init.lua already wrote.
+# Emits the client config the agent actually accepts.
 #
-# That is still true now that rec asks TCC directly instead of inferring the
-# answer from a frame count: authorizationStatus resolves against the
-# responsible process too. Run from a terminal it reports on the terminal.
-check_mic_permission() {
-  local status_file="$CONFIG_DIR/.hark-mic-status"
-  if [[ ! -f "$status_file" ]]; then
-    doctor_fail "Hammerspoon can reach the microphone" \
-      "Hammerspoon hasn't probed the mic yet — is it running? (open -a Hammerspoon)"
-    return 1
+# The agent enforces a transport policy: plain HTTP to loopback always; to a
+# numeric IP only with an explicit allowPlaintext; to a HOSTNAME never, because
+# a name resolves through something and a MagicDNS name is a hostname. Writing
+# a config the agent will refuse just moves the failure to first launch, so the
+# refusal happens here where it can be explained.
+write_client_config() {
+  local server="$1" key="$2" host scheme plaintext="false"
+  scheme="${server%%://*}"
+  host="${server#*://}"; host="${host%%/*}"; host="${host%%:*}"
+
+  if [[ "$scheme" == "http" ]] && ! is_loopback_host "$host"; then
+    if ! is_numeric_ip "$host"; then
+      err "the agent will refuse plain HTTP to the hostname '${host}'."
+      err "Use the numeric address instead — a Tailscale MagicDNS name is a"
+      err "hostname, so use the tailnet IP — or serve it over https://."
+      exit 1
+    fi
+    # A numeric IP on a tailnet is a defensible place for plaintext, but it
+    # should be a stated decision rather than a silent default.
+    plaintext="true"
+    warn "audio and transcripts will cross the network unencrypted to ${host}."
+    warn "On a tailnet that is defensible; recording it as allowPlaintext."
   fi
 
-  local status
-  status="$(head -n 1 "$status_file" 2>/dev/null || true)"
-  case "$status" in
-    ok)
-      doctor_pass "Hammerspoon can reach the microphone"
-      return 0
-      ;;
-    denied)
-      doctor_fail "Hammerspoon can reach the microphone" \
-        "System Settings -> Privacy & Security -> Microphone -> turn ON Hammerspoon (it will be listed now — it has finally asked)"
+  mkdir -p "$HARK_CONFIG_DIR"
+  # 600 BEFORE the secret goes in, so there is no world-readable window.
+  : > "$CLIENT_CONFIG"
+  chmod 600 "$CLIENT_CONFIG"
+  cat > "$CLIENT_CONFIG" <<EOF
+{
+  "server": "$(json_escape "$server")",
+  "key": "$(json_escape "$key")",
+  "allowPlaintext": ${plaintext}
+}
+EOF
+  chmod 600 "$CLIENT_CONFIG"
+}
+
+is_loopback_host() {
+  [[ "$1" == "127.0.0.1" || "$1" == "localhost" || "$1" == "::1" ]]
+}
+
+# Dotted quad, or anything with a colon (IPv6). The only question is whether
+# the user gave an address or a name.
+is_numeric_ip() {
+  local h="$1"
+  [[ "$h" == *:* ]] && return 0
+  [[ "$h" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]
+}
+
+resolve_config() {
+  local server="" key=""
+
+  # 1. An existing client.json wins - re-running must not clobber hand edits.
+  server="$(json_field server || true)"
+  key="$(json_field key || true)"
+
+  # 2. Otherwise migrate the Hammerspoon client's config.
+  if [[ -z "$server" ]]; then server="$(legacy_field server || true)"; fi
+  if [[ -z "$key" ]]; then key="$(legacy_field key || true)"; fi
+
+  # 3. Otherwise, if the server runs on this Mac, its key is already local.
+  if [[ -z "$key" && -r "$SERVER_KEY" ]]; then
+    key="$(tr -d '[:space:]' < "$SERVER_KEY")"
+  fi
+
+  # 4. Otherwise the server is another Mac, so fetch its key over SSH.
+  if [[ -z "$key" ]]; then
+    key="$(fetch_key_over_ssh)" || true
+  fi
+
+  if [[ -z "$server" ]]; then server="$DEFAULT_SERVER"; fi
+
+  if [[ -z "$key" ]]; then
+    err "no shared secret found."
+    printf '  Looked in, in order:\n' >&2
+    printf '    %s ("key" field)\n' "$CLIENT_CONFIG" >&2
+    printf '    %s (key = "...")\n' "$LEGACY_CONFIG" >&2
+    printf '    %s (the server'"'"'s own key, if it runs on this Mac)\n' "$SERVER_KEY" >&2
+    printf '  For a two-machine setup, pass the server'"'"'s SSH host:\n' >&2
+    printf '    ./install-client.sh <ssh-host>\n' >&2
+    exit 1
+  fi
+
+  write_client_config "$server" "$key"
+  log "wrote $CLIENT_CONFIG (600) — server: $server"
+
+  # The key came from another Mac but the URL is still loopback, which would
+  # POST every recording into the void on this one. Cheap to say, and the
+  # alternative — deriving the URL from the SSH host — is exactly the guess
+  # that makes a config look healthy while the client silently fails.
+  if [[ "$server" == "$DEFAULT_SERVER" && -n "$SERVER_HOST" ]]; then
+    warn "the server URL is still the loopback default, but the key came from"
+    warn "'$SERVER_HOST'. Set the real address in $CLIENT_CONFIG."
+  fi
+}
+
+# Fetches the shared secret from the Mac running the server. Prints it on
+# stdout; prints nothing and returns non-zero on any failure.
+#
+# The SSH host is NOT derived from the server URL, nor the URL from the host.
+# An alias that works for `ssh <host>` — a ~/.ssh/config entry, a MagicDNS
+# name — is not necessarily an address curl can reach.
+fetch_key_over_ssh() {
+  if [[ -z "$SERVER_HOST" ]]; then
+    # Non-interactive (CI, a piped install): fail to the caller's message
+    # rather than blocking forever on a read that can never be answered.
+    [[ -t 0 ]] || return 1
+    {
+      echo
+      echo "No key found on this Mac, so hark's server is presumably another one."
+      echo
+      echo "If it should be THIS Mac, quit (Ctrl-C) and run ./install-server.sh first."
+      echo
+      echo "Otherwise give the server's SSH host — exactly what you would type for"
+      echo "'ssh <host>' today (a ~/.ssh/config alias, a Tailscale name, or an IP)."
+    } >&2
+    read -rp "server SSH host: " SERVER_HOST
+  fi
+  [[ -n "$SERVER_HOST" ]] || return 1
+
+  log "fetching the shared secret from ${SERVER_HOST} over SSH..." >&2
+  local err_file fetched rc=0
+  err_file="$(mktemp)"
+
+  fetched="$(ssh -o ConnectTimeout=10 "$SERVER_HOST" 'cat ~/.config/hark/key' 2>"$err_file")" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    err "could not fetch the key from '${SERVER_HOST}'. Likely causes:"
+    err "  - you are not on the same network/tailnet right now"
+    err "  - '${SERVER_HOST}' is not the right SSH host/alias for the server"
+    err "  - SSH key auth to that host is not set up (if it hung, that is probably it)"
+    err "  - ~/.config/hark/key does not exist there — run ./install-server.sh on it"
+    err "ssh said:"
+    sed 's/^/    /' "$err_file" >&2 || true
+    rm -f "$err_file"
+    return 1
+  fi
+  rm -f "$err_file"
+
+  fetched="$(printf '%s' "$fetched" | tr -d '[:space:]')"
+  if [[ -z "$fetched" ]]; then
+    err "fetched an EMPTY key from ${SERVER_HOST} — check ~/.config/hark/key there."
+    return 1
+  fi
+  printf '%s' "$fetched"
+}
+
+# ==============================================================================
+# Stale TCC grants
+# ==============================================================================
+#
+# An ad-hoc signature's designated requirement is a bare content hash:
+#
+#   designated => cdhash H"6836bec46e8c7d394cf1ba94421ff18a31674867"
+#
+# so every rebuild is a new code identity and the Accessibility grant stops
+# applying. What macOS does NOT do is tidy up: the old row survives with
+# auth_value=2 and System Settings keeps drawing a switched-ON toggle for a
+# binary nothing trusts. Observed twice on 2026-08-03, and it is genuinely
+# misleading - you go to grant the permission, find it already granted, and
+# conclude the problem is somewhere else.
+#
+# Toggling it off and on by hand works. So does this, without the detour.
+#
+# Only Accessibility is reset, for two reasons. It is the grant observed to
+# break on rebuild, and the microphone path already tells the truth on its own:
+# the agent's probe actually runs rec and reports what happened, so a stale
+# microphone row cannot produce a false PASS the way a stale Accessibility row
+# did. Resetting it anyway would cost a consent dialog for nothing.
+#
+# A Developer ID signature makes this whole function dead code, because the
+# requirement becomes the certificate rather than the hash.
+current_cdhash() {
+  codesign -dvvv "$APP_DST" 2>&1 | sed -n 's/^CDHash=//p' | head -1
+}
+
+reset_stale_grants_on_identity_change() {
+  local new_hash old_hash=""
+  new_hash="$(current_cdhash)"
+  [[ -n "$new_hash" ]] || return 0
+  [[ -f "$INSTALLED_CDHASH" ]] && old_hash="$(cat "$INSTALLED_CDHASH")"
+
+  mkdir -p "$HARK_CONFIG_DIR"
+  printf '%s' "$new_hash" > "$INSTALLED_CDHASH"
+
+  # First install, or the same binary reinstalled: nothing to invalidate.
+  [[ -n "$old_hash" && "$old_hash" != "$new_hash" ]] || return 0
+
+  warn "the agent binary changed (${old_hash:0:12}… -> ${new_hash:0:12}…)."
+  warn "Ad-hoc signing ties TCC grants to that hash, so the Accessibility grant"
+  warn "no longer applies — and macOS would still show its toggle switched ON."
+  if tccutil reset Accessibility "$AGENT_LABEL" >/dev/null 2>&1; then
+    warn "Cleared the stale entry. You will be asked to grant it again."
+  else
+    warn "Could not clear it automatically. Toggle hark OFF and back ON in"
+    warn "System Settings -> Privacy & Security -> Accessibility."
+  fi
+}
+
+# ==============================================================================
+# LaunchAgent
+# ==============================================================================
+#
+# RunAtLoad only, no KeepAlive. A crashed agent should stay down and be
+# noticed, not be silently resurrected into a crash loop that looks like
+# "the hotkey is flaky".
+#
+# ProgramArguments points INSIDE the bundle. That is deliberate and is what
+# keeps TCC attributing the microphone and Accessibility grants to
+# com.drycodeworks.hark-agent: the executable is covered by the bundle's code
+# signature, so its identity resolves to the bundle regardless of who exec'd
+# it. `open -a` would work too but gives launchd nothing to supervise.
+
+write_plist() {
+  mkdir -p "$LAUNCH_AGENTS"
+  cat > "$AGENT_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>${AGENT_LABEL}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>${APP_DST}/Contents/MacOS/hark</string>
+		<string>agent</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>StandardOutPath</key>
+	<string>/tmp/hark-agent.out</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/hark-agent.err</string>
+</dict>
+</plist>
+EOF
+  log "wrote $AGENT_PLIST"
+}
+
+agent_loaded() {
+  # Captured into a variable first, NOT piped. `launchctl list | grep -q X`
+  # under `set -o pipefail` reports every service as not-loaded: grep exits at
+  # the first match, launchctl takes SIGPIPE, and pipefail propagates it.
+  local listing
+  listing="$(launchctl list 2>/dev/null || true)"
+  printf '%s' "$listing" | grep -q "$AGENT_LABEL"
+}
+
+reload_agent() {
+  local domain
+  domain="gui/$(id -u)"
+  if agent_loaded; then
+    launchctl bootout "$domain/$AGENT_LABEL" 2>/dev/null || true
+    # `Bootstrap failed: 5: Input/output error` right after a bootout is
+    # usually the old instance still tearing down, not a bad plist.
+    sleep 1
+  fi
+  if ! launchctl bootstrap "$domain" "$AGENT_PLIST" 2>/dev/null; then
+    sleep 2
+    launchctl bootstrap "$domain" "$AGENT_PLIST" 2>/dev/null || {
+      err "launchctl bootstrap failed for $AGENT_LABEL"
+      err "try: launchctl bootout $domain/$AGENT_LABEL && launchctl bootstrap $domain $AGENT_PLIST"
       return 1
-      ;;
-    error)
-      # The probe failed for a reason that is not permission — a muted device,
-      # a dead input, rec missing. Sending the user to the Microphone toggle
-      # would be a wrong answer, so report what actually happened instead.
-      local detail
-      detail="$(sed -n '3p' "$status_file" 2>/dev/null || true)"
-      doctor_fail "Hammerspoon can reach the microphone" \
-        "the probe failed, but not on permission: ${detail:-see $status_file}"
-      return 1
-      ;;
-    *)
-      doctor_fail "Hammerspoon can reach the microphone (unrecognized status in ${status_file}: '${status:-empty}')" \
-        "reload Hammerspoon's config (menu bar icon -> Reload Config) to re-run the probe"
-      return 1
-      ;;
+    }
+  fi
+  log "loaded $AGENT_LABEL"
+}
+
+# ==============================================================================
+# Doctor
+# ==============================================================================
+
+check_app_installed() {
+  if [[ ! -d "$APP_DST" ]]; then
+    doctor_fail "Hark.app is installed" "run ./install-client.sh"
+    return 1
+  fi
+  doctor_pass "Hark.app is installed at $APP_DST"
+}
+
+check_signature() {
+  if [[ ! -d "$APP_DST" ]]; then
+    doctor_fail "Hark.app has a valid signature" "run ./install-client.sh"
+    return 1
+  fi
+  if ! codesign --verify --strict "$APP_DST" 2>/dev/null; then
+    doctor_fail "Hark.app has a valid signature" \
+      "rebuild it: ./install-client.sh"
+    return 1
+  fi
+  local identity
+  identity="$(codesign -dvv "$APP_DST" 2>&1 | grep -E '^Signature=' | cut -d= -f2- || true)"
+  doctor_pass "Hark.app signature is valid (${identity:-unknown})"
+}
+
+check_config() {
+  if [[ ! -f "$CLIENT_CONFIG" ]]; then
+    doctor_fail "$CLIENT_CONFIG exists" "run ./install-client.sh"
+    return 1
+  fi
+  local perms
+  perms="$(stat -f '%OLp' "$CLIENT_CONFIG")"
+  if [[ "$perms" != "600" ]]; then
+    doctor_fail "$CLIENT_CONFIG is 600 (it holds a secret)" "chmod 600 $CLIENT_CONFIG"
+    return 1
+  fi
+  if ! json_field key >/dev/null; then
+    doctor_fail "$CLIENT_CONFIG has a key" "run ./install-client.sh"
+    return 1
+  fi
+  doctor_pass "$CLIENT_CONFIG is present, 600, and has a key"
+}
+
+check_agent_running() {
+  if ! agent_loaded; then
+    doctor_fail "the agent is loaded in launchd" "run ./install-client.sh"
+    return 1
+  fi
+  if ! pgrep -f "$APP_DST/Contents/MacOS/hark" >/dev/null 2>&1; then
+    doctor_fail "the agent process is running" \
+      "check /tmp/hark-agent.err and ~/Library/Logs/hark-agent.log"
+    return 1
+  fi
+  doctor_pass "the agent is loaded and running"
+}
+
+# Reads the outcome the AGENT's own startup probe wrote. This is the only
+# reliable way to learn whether the agent can reach the microphone: TCC
+# attributes a request to the responsible process, and rec runs as the
+# agent's child — so running rec from THIS shell would test the terminal's
+# grant, a different permission that produces a confidently wrong PASS.
+# Never run rec from here to "test" this; read what the agent wrote.
+# Reads one field out of the agent's status.json without needing jq.
+#
+# THE AGENT REPORTS ON ITSELF, and nothing here measures it from outside.
+# That is not a style choice — both permissions were got wrong the other way
+# during bring-up:
+#
+#   - a microphone probe run from this script tests the TERMINAL's grant, not
+#     the agent's, because TCC attributes to the responsible process. A
+#     confidently wrong PASS.
+#   - querying TCC.db for Accessibility reports what was true for some EARLIER
+#     build. An ad-hoc signature's designated requirement is a bare cdhash, so
+#     every rebuild is a new identity while the old row survives reading
+#     granted — and System Settings keeps drawing a switched-ON toggle for a
+#     binary nothing trusts. This check printed PASS while the agent was
+#     alerting on screen that it could not paste.
+status_field() {
+  local field="$1"
+  [[ -f "$STATUS_JSON" ]] || return 1
+  local value
+  value="$(sed -E 's/.*"'"${field}"'"[[:space:]]*:[[:space:]]*"?([^",}]*)"?.*/\1/' "$STATUS_JSON" 2>/dev/null)"
+  [[ -n "$value" ]] || return 1
+  printf '%s' "$value"
+}
+
+# The heartbeat rewrites status.json every 30s, so a stale file means the agent
+# died without saying so and every field in it is a claim about a process that
+# no longer exists.
+status_is_fresh() {
+  local written now
+  written="$(status_field written_epoch)" || return 1
+  now="$(date +%s)"
+  [[ $((now - written)) -lt 120 ]]
+}
+
+check_status_freshness() {
+  if [[ ! -f "$STATUS_JSON" ]]; then
+    doctor_fail "the agent has reported its status" \
+      "the agent has not started yet — run ./install-client.sh"
+    return 1
+  fi
+  if ! status_is_fresh; then
+    doctor_fail "the agent's status is current" \
+      "status.json is stale (>120s) — the agent is not running; check /tmp/hark-agent.err"
+    return 1
+  fi
+  doctor_pass "the agent is reporting (pid $(status_field pid))"
+}
+
+check_mic() {
+  local v
+  v="$(status_field microphone || true)"
+  case "$v" in
+    authorized) doctor_pass "the agent can reach the microphone" ;;
+    "")         doctor_fail "the agent can reach the microphone" "no status yet — is the agent running?" ;;
+    *)          doctor_fail "the agent can reach the microphone (reported: $v)" \
+                  "System Settings -> Privacy & Security -> Microphone -> turn ON hark" ;;
   esac
 }
 
-check_server_url() {
-  local server
-  if ! server="$(config_field server)"; then
-    doctor_fail "server URL is well-formed" "no server URL in ${CONFIG_FILE} — run ./install-client.sh first"
-    return 1
-  fi
 
-  # An SSH-style "user@host" leaking into the HTTP URL. curl tolerates it (so
-  # a reachability check alone passes), but it is basic-auth userinfo, not an
-  # SSH target, and Hammerspoon's hs.http (NSURL) is stricter than curl. This
-  # is exactly how a config can look healthy while the client silently fails.
-  if [[ "$server" =~ ^[a-z]+://[^/@]+@ ]]; then
-    doctor_fail "server URL is well-formed (${server})" \
-      "the URL contains SSH-style 'user@' userinfo. Re-run ./install-client.sh to rewrite it, or edit ${CONFIG_FILE} and delete the 'user@' from the server line."
-    return 1
-  fi
-
-  doctor_pass "server URL is well-formed (${server})"
-  return 0
+# The hotkey field used to be a hardcoded "registered" literal, so it reported
+# success whether or not anything was bound — which is exactly how a dead
+# CGEventTap looked healthy from outside. It now reflects the real binding.
+check_hotkey_bound() {
+  local v
+  v="$(status_field hotkey || true)"
+  case "$v" in
+    registered) doctor_pass "Ctrl+Alt+Space is bound" ;;
+    "")         doctor_fail "Ctrl+Alt+Space is bound" "no status yet — is the agent running?" ;;
+    *)          doctor_fail "Ctrl+Alt+Space is bound (reported: $v)" \
+                  "something else is holding the chord — quit it and re-run ./install-client.sh" ;;
+  esac
 }
 
+check_accessibility() {
+  local v
+  v="$(status_field accessibility || true)"
+  case "$v" in
+    trusted) doctor_pass "Accessibility is granted" ;;
+    "")      doctor_fail "Accessibility is granted" "no status yet — is the agent running?" ;;
+    *)       doctor_fail "Accessibility is granted (reported: $v)" \
+               "System Settings -> Privacy & Security -> Accessibility -> turn ON hark, then re-run this" ;;
+  esac
+}
+
+check_hotkey_conflict() {
+  if pgrep -x Hammerspoon >/dev/null 2>&1; then
+    doctor_fail "nothing else holds Ctrl+Alt+Space" \
+      "Hammerspoon is running and owns the hotkey — quit it (osascript -e 'quit app \"Hammerspoon\"')"
+    return 1
+  fi
+  doctor_pass "nothing else is holding Ctrl+Alt+Space"
+}
+
+# The permissions and the process can all be healthy while the server is
+# simply unreachable — a downed tailnet, a stopped service — and the symptom
+# of that is identical to a microphone fault from the user's chair: you hold
+# the key, speak, and nothing appears.
 check_health() {
   local server url
-  if ! server="$(config_field server)"; then
-    doctor_fail "server /health reachable" "no server URL in ${CONFIG_FILE} — run ./install-client.sh first"
+  if ! server="$(json_field server)"; then
+    doctor_fail "server /health reachable" "no server URL in $CLIENT_CONFIG — run ./install-client.sh"
     return 1
   fi
   url="${server%/dictate}/health"
-
   if curl -sf --max-time 5 "$url" >/dev/null 2>&1; then
-    doctor_pass "server /health reachable (${url})"
+    doctor_pass "server /health reachable ($url)"
     return 0
   fi
-  doctor_fail "server /health reachable (${url})" "check the tailnet (tailscale status) and that hark is running on the server (ssh <server> launchctl list | grep hark)"
+  doctor_fail "server /health reachable ($url)" \
+    "check the tailnet (tailscale status) and that hark is running on the server (ssh <server> launchctl list | grep hark)"
   return 1
 }
 
-# POSTs a tiny generated-on-the-fly silent WAV to /dictate and checks the key
-# authenticates. A 200 or 400 both prove the key is good (the server checks
-# X-Hark-Key before it looks at the audio at all, so either response means
-# auth passed); a 401 proves it isn't.
-check_key_auth() {
-  local server key
-  if ! server="$(config_field server)" || ! key="$(config_field key)"; then
-    doctor_fail "key authenticates against /dictate" "hark-config.lua is missing server or key — run ./install-client.sh"
-    return 1
-  fi
-
-  local tmp_dir tmp_wav
-  tmp_dir="$(mktemp -d)"
-  tmp_wav="$tmp_dir/probe.wav"
-
-  # Half a second of silence, rather than recording anything: this check is
-  # about whether the KEY is accepted, and opening the microphone here would
-  # both prompt for a permission this script does not need and test the
-  # terminal's TCC grant instead of Hammerspoon's. The server answers
-  # 200-with-empty-transcript for silence, which is a pass — only a 401 fails.
-  #
-  # Written with printf and dd rather than a python3 one-liner. That one-liner
-  # quietly made Python a requirement on the CLIENT Mac, which otherwise needs
-  # only Homebrew, Hammerspoon and swiftc — and when it was missing, the check
-  # failed in a way that read like a hark problem rather than a missing
-  # interpreter.
-  #
-  # A 16 kHz mono 16-bit WAV of silence is a fixed 44-byte header followed by
-  # zeros. Header fields below are little-endian: RIFF chunk size 16036
-  # (36 + data), fmt chunk 16, PCM format 1, 1 channel, 16000 Hz, byte rate
-  # 32000, block align 2, 16 bits per sample, data size 16000.
-  if ! {
-    printf 'RIFF\244\076\000\000WAVEfmt \020\000\000\000\001\000\001\000\200\076\000\000\000\175\000\000\002\000\020\000data\200\076\000\000' &&
-      dd if=/dev/zero bs=16000 count=1 2>/dev/null
-  } >"$tmp_wav"; then
-    doctor_fail "key authenticates against /dictate" "could not write the test WAV to ${tmp_dir}"
-    rm -rf "$tmp_dir"
-    return 1
-  fi
-
-  local status
-  status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
-    -X POST "$server" \
-    -H "X-Hark-Key: ${key}" \
-    -H "Content-Type: audio/wav" \
-    --data-binary "@${tmp_wav}" 2>/dev/null || true)"
-  rm -rf "$tmp_dir"
-
-  case "$status" in
-    200|400)
-      doctor_pass "key authenticates against /dictate (HTTP ${status})"
-      return 0
-      ;;
-    401)
-      doctor_fail "key authenticates against /dictate (HTTP 401)" "the key in ${CONFIG_FILE} doesn't match the server's ~/.config/hark/key — re-run ./install-client.sh to refetch it"
-      return 1
-      ;;
-    *)
-      doctor_fail "key authenticates against /dictate (got: ${status:-no response})" "could not get a clean response from ${server} — check the tailnet and that hark is running"
-      return 1
-      ;;
-  esac
-}
-
-run_diagnostics() {
-  DOCTOR_FAILURES=0
-  echo
-  check_hammerspoon_installed || true
-  check_hammerspoon_running || true
-  check_init_symlink || true
-  check_config_file || true
-  check_recorder || true
-  check_mic_permission || true
-  check_server_url || true
-
+run_doctor() {
+  printf '\nhark client diagnostics\n\n'
+  check_app_installed || true
+  check_signature || true
+  check_config || true
+  check_agent_running || true
+  check_status_freshness || true
+  check_hotkey_conflict || true
+  check_hotkey_bound || true
+  check_mic || true
+  check_accessibility || true
   check_health || true
-  check_key_auth || true
-  echo
-  if [[ "$DOCTOR_FAILURES" -eq 0 ]]; then
-    log "All checks passed."
-    return 0
+  printf '\n'
+  if [[ "$doctor_failures" -gt 0 ]]; then
+    err "$doctor_failures check(s) failed"
+    return 1
   fi
-  err "${DOCTOR_FAILURES} check(s) failed — see the FAIL lines above, each names its exact fix."
-  return 1
+  log "all checks passed"
 }
 
 # ==============================================================================
-# Arg parsing
+# Uninstall
 # ==============================================================================
 
-DOCTOR_MODE=false
-POSITIONAL_ARGS=()
+run_uninstall() {
+  if agent_loaded; then
+    launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
+    log "unloaded $AGENT_LABEL"
+  fi
+  rm -f "$AGENT_PLIST"
+  rm -rf "$APP_DST"
+  log "removed $APP_DST and $AGENT_PLIST"
+  # client.json is deliberately left in place: it holds the shared secret and
+  # is what a reinstall (or the Hammerspoon client) would want back.
+  log "left $CLIENT_CONFIG alone — delete it by hand if you meant to."
+}
+
+# ==============================================================================
+# Main
+# ==============================================================================
+
+# Sourcing this file defines the helpers and check_* functions and stops here,
+# so the test suite can exercise them without running an install. Everything
+# below this line only runs when the script is executed directly.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
+KEEP_HAMMERSPOON=0
+MODE="install"
 for arg in "$@"; do
   case "$arg" in
-    --doctor)
-      DOCTOR_MODE=true
-      ;;
+    --doctor)           MODE="doctor" ;;
+    --uninstall)        MODE="uninstall" ;;
+    --keep-hammerspoon) KEEP_HAMMERSPOON=1 ;;
     -h|--help)
-      echo "Usage: $0 [--doctor] [server-ssh-host]"
-      echo "  (no args)         run the full interactive install"
-      echo "  server-ssh-host   skip the 'server SSH host' prompt"
-      echo "  --doctor          read-only: run the diagnostic checks and exit"
+      sed -n '2,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
+    -*)
+      err "unknown option: $arg (try --help)"
+      exit 2
+      ;;
     *)
-      POSITIONAL_ARGS+=("$arg")
+      # A bare argument is the server's SSH host, so a two-machine install can
+      # skip the prompt. Not merged with the server URL: an alias that works
+      # for `ssh <host>` is not necessarily something curl can reach.
+      if [[ -n "$SERVER_HOST" ]]; then
+        err "more than one SSH host given: '$SERVER_HOST' and '$arg'"
+        exit 2
+      fi
+      SERVER_HOST="$arg"
       ;;
   esac
 done
 
-# --- 0. sanity ---------------------------------------------------------------
-
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  err "this installs macOS-only tools (Hammerspoon, avfoundation). Run it on the client Mac."
-  exit 1
-fi
-
-if $DOCTOR_MODE; then
-  log "hark --doctor: read-only checks, nothing will be changed."
-  if run_diagnostics; then
-    exit 0
-  else
-    exit 1
-  fi
-fi
-
-if ! command -v brew >/dev/null 2>&1; then
-  err "Homebrew is not installed. Install it first: https://brew.sh"
-  exit 1
-fi
-
-# --- 1. Homebrew installs -----------------------------------------------------
-
-log "Checking Hammerspoon..."
-if brew list --cask hammerspoon >/dev/null 2>&1; then
-  log "hammerspoon already installed."
-else
-  log "Installing hammerspoon..."
-  brew install --cask hammerspoon
-fi
-
-# Recording is NOT done with ffmpeg. Its avfoundation input device accepts
-# only packed sample layouts, and a 24-bit USB interface (a Focusrite
-# Scarlett 2i2, for one) offers nothing but 24-bit UNPACKED — so ffmpeg dies
-# with "audio format is not supported" whenever CoreAudio hands it the
-# device's physical format rather than the converted Float32 virtual one.
-# Which of the two you get varies per open, so it failed roughly half the
-# time. client/rec.swift uses AVAudioEngine, whose input is Float32 by
-# contract and never sees the physical format. See its header comment.
-log "Building the recorder (client/rec.swift)..."
-if ! command -v swiftc >/dev/null 2>&1; then
-  err "swiftc not found. Install the Xcode command line tools: xcode-select --install"
-  exit 1
-fi
-
-mkdir -p "$CONFIG_DIR"
-if ! swiftc -O -o "$RECORDER_BIN" "$CLIENT_DIR/rec.swift"; then
-  err "could not build $CLIENT_DIR/rec.swift"
-  exit 1
-fi
-log "recorder: $RECORDER_BIN"
-
-# --- 2. Shared secret ---------------------------------------------------------
-#
-# Two cases, and the local one is the default because it is the one that
-# needs no explanation: if hark's server runs on THIS Mac, the key is simply
-# sitting in ~/.config/hark/key and there is no network involved at all.
-#
-# Only when it isn't there do we ask for an SSH host — that means the server
-# is another machine. The host is deliberately NOT guessed: an alias that
-# works for `ssh <host>` (e.g. via ~/.ssh/config) is not necessarily a
-# hostname curl can reach, so it is asked for separately from the HTTP URL in
-# step 4 below.
-
-LOCAL_KEY_FILE="$HOME/.config/hark/key"
-SERVER_HOST="${POSITIONAL_ARGS[0]:-${HARK_SERVER_HOST:-}}"
-
-if [[ -z "$SERVER_HOST" && -s "$LOCAL_KEY_FILE" ]]; then
-  log "Found a local shared secret (${LOCAL_KEY_FILE}) — single-machine setup, no SSH needed."
-  HARK_KEY="$(tr -d '\n' < "$LOCAL_KEY_FILE")"
-else
-  if [[ -z "$SERVER_HOST" ]]; then
-    echo
-    echo "No local key at ${LOCAL_KEY_FILE}, so hark's server is presumably"
-    echo "another machine."
-    echo
-    echo "If it should be THIS Mac, quit (Ctrl-C) and run ./install-server.sh first."
-    echo
-    echo "Otherwise give the server's SSH host — exactly what you'd type for"
-    # shellcheck disable=SC2088  # literal text for the user to read, not a path to expand
-    echo "'ssh <host>' today (a ~/.ssh/config alias, a Tailscale MagicDNS name,"
-    echo "or a private IP). Not guessed automatically."
-    read -rp "server SSH host: " SERVER_HOST
-  fi
-  if [[ -z "$SERVER_HOST" ]]; then
-    err "no server SSH host given, aborting."
-    exit 1
-  fi
-
-  log "Fetching the shared secret from ${SERVER_HOST}:~/.config/hark/key over SSH..."
-  SSH_ERR_FILE="$(mktemp)"
-  trap 'rm -f "$SSH_ERR_FILE"' EXIT
-
-  if ! HARK_KEY="$(ssh -o ConnectTimeout=10 "$SERVER_HOST" cat ~/.config/hark/key 2>"$SSH_ERR_FILE")"; then
-    err "could not fetch the key from '${SERVER_HOST}'. Likely causes:"
-    err "  - you're not on the same network/tailnet right now"
-    err "  - '${SERVER_HOST}' isn't the right SSH host/alias for the server"
-    err "  - SSH key auth to that host isn't set up (if it hung, that's probably it)"
-    err "  - ~/.config/hark/key doesn't exist on the server — run"
-    err "    ./install-server.sh there first"
-    err "ssh said:"
-    sed 's/^/    /' "$SSH_ERR_FILE" >&2 || true
-    exit 1
-  fi
-
-  if [[ -z "$HARK_KEY" ]]; then
-    err "fetched an EMPTY key from ${SERVER_HOST}. Check ~/.config/hark/key on the server isn't a zero-byte file."
-    exit 1
-  fi
-fi
-if [[ "$HARK_KEY" == *'"'* || "$HARK_KEY" == *$'\n'* ]]; then
-  err "the fetched key contains a quote or newline, which would break the generated Lua config. This is unexpected — check ~/.config/hark/key on the server by hand."
-  exit 1
-fi
-log "Got the shared secret (${#HARK_KEY} characters)."
-
-# --- 3. Microphone selection --------------------------------------------------
-#
-# There is nothing to ask. rec records the SYSTEM DEFAULT input, so the mic is
-# chosen in System Settings -> Sound -> Input like every other app on the
-# machine. Earlier versions asked for an avfoundation device INDEX, which was
-# both an extra thing to get wrong and genuinely unstable: those indices are
-# positional, so a virtual device appearing or disappearing (Loom installs
-# one) silently renumbers every device after it.
-
-log "Microphone: whatever is selected in System Settings -> Sound -> Input."
-
-# --- 4. server HTTP URL + reachability ----------------------------------------
-
-if [[ -z "$SERVER_HOST" ]]; then
-  # Single machine: the server is right here, so there is nothing to ask and
-  # nothing to resolve. Loopback is not a guess, it is the only correct answer.
-  DEFAULT_URL="http://127.0.0.1:${HARK_PORT}/dictate"
-  HARK_URL="$DEFAULT_URL"
-  log "Server URL: ${HARK_URL} (this Mac)"
-else
-  # SERVER_HOST is an SSH target, so it may carry a "user@" prefix and/or a
-  # ":port" suffix. Neither belongs in an HTTP URL: "user@" is basic-auth
-  # userinfo, which hark ignores, and an SSH port is not the HTTP port.
-  # curl tolerates the userinfo form, so this drifted through --doctor as a
-  # PASS while writing http://user@some-host:8911/dictate into the config.
-  # Hammerspoon's hs.http (NSURL) is stricter than curl, so strip both.
-  HTTP_HOST="${SERVER_HOST##*@}"   # drop "user@"
-  HTTP_HOST="${HTTP_HOST%%:*}"     # drop any ":port"
-
-  DEFAULT_URL="http://${HTTP_HOST}:${HARK_PORT}/dictate"
-  echo
-  echo "server /dictate URL. This must be directly reachable by curl/HTTP — an"
-  echo "SSH config alias may not be (SSH config aliases aren't read by curl)."
-  echo "If '${HTTP_HOST}' isn't itself a resolvable hostname, use the server's"
-  echo "private IP with port ${HARK_PORT}."
-  read -rp "server /dictate URL [${DEFAULT_URL}]: " HARK_URL
-  HARK_URL="${HARK_URL:-$DEFAULT_URL}"
-fi
-
-# Guard the hand-typed case too: a pasted "http://user@host:8911/dictate" is
-# just as wrong as a derived one.
-if [[ "$HARK_URL" =~ ^([a-z]+://)([^/@]+@)(.*)$ ]]; then
-  HARK_URL="${BASH_REMATCH[1]}${BASH_REMATCH[3]}"
-  warn "Stripped the 'user@' from the URL — that's SSH syntax, not HTTP."
-  warn "Using: ${HARK_URL}"
-fi
-
-HEALTH_URL="${HARK_URL%/dictate}/health"
-log "Checking ${HEALTH_URL} ..."
-if curl -sf --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; then
-  log "hark is reachable."
-else
-  warn "could not reach ${HEALTH_URL}."
-  if [[ -z "$SERVER_HOST" ]]; then
-    warn "  - the server doesn't appear to be running on this Mac: ./install-server.sh"
-    warn "  - check its state: launchctl list | grep hark, and /tmp/hark.err"
-  else
-    warn "  - check the network/tailnet path to ${SERVER_HOST}"
-    warn "  - check hark is running there: ssh ${SERVER_HOST} launchctl list | grep hark"
-  fi
-  warn "  - the client will still be configured below; fix reachability before using it."
-fi
-
-# --- 5. Write the client config ------------------------------------------------
-
-mkdir -p "$CONFIG_DIR"
-umask 077
-cat > "$CONFIG_FILE" <<LUACONFIG
--- Generated by install-client.sh on $(date '+%Y-%m-%d %H:%M:%S %Z').
--- Re-run ./install-client.sh any time to regenerate (e.g. after the server rotates the
--- key, or to change the server). Contains a real secret — never commit this
--- file, never share it.
---
--- No mic setting: rec records the system default input, chosen in
--- System Settings -> Sound -> Input.
-return {
-  server = "${HARK_URL}",
-  key = "${HARK_KEY}",
-  recorder = "${RECORDER_BIN}",
-}
-LUACONFIG
-chmod 600 "$CONFIG_FILE"
-log "Wrote ${CONFIG_FILE} (chmod 600)."
-
-# --- 6. Install init.lua -------------------------------------------------------
-#
-# A pre-existing REAL file here (not a symlink) means Hammerspoon would load
-# THAT file instead of this repo's client/init.lua and hark would never
-# fire — silently, with no error anywhere. That is exactly the failure mode
-# this whole fix is about, so this is a hard stop, not a warning to scroll past.
-
-if [[ -e "$CONFIG_DIR/init.lua" && ! -L "$CONFIG_DIR/init.lua" ]]; then
-  err "${CONFIG_DIR}/init.lua already exists as a REAL file (not a symlink) — refusing to overwrite it."
-  err "Hammerspoon would load THAT file instead of this repo's client/init.lua, and the hotkey would never be bound."
-  err "Fix it, then re-run this script:"
-  err "  mv ${CONFIG_DIR}/init.lua ${CONFIG_DIR}/init.lua.bak"
-  err "(merge anything you need from init.lua.bak into ${CLIENT_DIR}/init.lua by hand afterward, if you had custom config there)"
-  exit 1
-fi
-ln -sf "${CLIENT_DIR}/init.lua" "$CONFIG_DIR/init.lua"
-log "Linked ${CONFIG_DIR}/init.lua -> ${CLIENT_DIR}/init.lua"
-
-# --- 7. Actually start Hammerspoon with the new config -------------------------
-#
-# THE BUG THIS SCRIPT USED TO HAVE: `brew install --cask hammerspoon` installs
-# the app bundle but never runs it. Every previous version of this script just
-# told the user to "open Hammerspoon (menu bar icon) -> Reload Config" — but on
-# a fresh install there IS no menu bar icon, because the app has never been
-# opened. init.lua never loads, the hotkey never binds, and holding the key
-# does literally nothing: no alert, no beep, no error, no HTTP request. That
-# exactly matches the symptom this fix exists to close.
-#
-# Hammerspoon does not auto-reload its config, and the `hs` CLI (`hs -c`,
-# which could trigger a reload remotely) is not installed unless the user has
-# already run hs.ipc.cliInstall() — so if Hammerspoon is already running, the
-# only reliable way to make it pick up a new config is to quit and relaunch it.
-
-log "Starting Hammerspoon with the new config..."
-if pgrep -x Hammerspoon >/dev/null 2>&1; then
-  log "Hammerspoon is already running — quitting it so it reloads the new config (it does not auto-reload)."
-  osascript -e 'quit app "Hammerspoon"' >/dev/null 2>&1 || true
-  for _ in $(seq 1 20); do
-    if ! pgrep -x Hammerspoon >/dev/null 2>&1; then
-      break
-    fi
-    sleep 0.5
-  done
-  if pgrep -x Hammerspoon >/dev/null 2>&1; then
-    warn "Hammerspoon didn't quit within 10s — forcing it closed."
-    pkill -x Hammerspoon >/dev/null 2>&1 || true
-    sleep 1
-  fi
-fi
-
-if ! open -a Hammerspoon; then
-  err "could not launch Hammerspoon via 'open -a Hammerspoon'. Is it installed at ${HAMMERSPOON_APP}?"
-  exit 1
-fi
-
-HAMMERSPOON_STARTED=false
-for _ in $(seq 1 20); do
-  if pgrep -x Hammerspoon >/dev/null 2>&1; then
-    HAMMERSPOON_STARTED=true
-    break
-  fi
-  sleep 0.5
-done
-if ! $HAMMERSPOON_STARTED; then
-  err "Hammerspoon did not start within 10s of 'open -a Hammerspoon'."
-  err "Try opening it by hand from /Applications, then re-run: ./install-client.sh --doctor"
-  exit 1
-fi
-log "Hammerspoon is running with the new config loaded."
-
-# --- 8. Accessibility permission ------------------------------------------------
-#
-# Cannot be granted from a script — macOS requires a human click in System
-# Settings. What CAN be scripted: detecting whether it's already granted
-# (best-effort — see tcc_allowed below), opening the exact pane instead of
-# making the user hunt for it, and blocking here instead of printing advice
-# into a wall of text at the very end that's easy to miss.
-#
-# This works as a pre-grantable, block-and-confirm step because the
-# Accessibility pane has a "+" button and lists every installed app whether
-# or not it has ever run — Hammerspoon requesting it is not a precondition
-# for it appearing in the list. Microphone is fundamentally different (see
-# step 8b below): it has no "+" button and only lists apps that have
-# ALREADY asked, so the same blocking pattern is impossible to satisfy
-# there and must not be used.
-
-# Best-effort read of the per-user TCC database. This can fail to see
-# anything useful if the terminal running this script itself lacks Full Disk
-# Access (macOS locks TCC.db down) — that failure mode is handled safely:
-# `tcc_allowed` returns false, and the caller treats "unconfirmed" the same
-# as "not granted" and blocks. It never trusts a read failure as a pass.
-tcc_allowed() {
-  local service="$1"
-  if ! command -v sqlite3 >/dev/null 2>&1; then
-    return 1
-  fi
-  local db="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
-  local value
-  value="$(sqlite3 -readonly "$db" \
-    "SELECT auth_value FROM access WHERE service='${service}' AND client='${HAMMERSPOON_BUNDLE_ID}' ORDER BY auth_value DESC LIMIT 1;" \
-    2>/dev/null || true)"
-  [[ "$value" == "2" ]]
-}
-
-require_permission() {
-  local name="$1" service="$2" pane_url="$3"
-  log "Checking ${name} permission for Hammerspoon..."
-  if tcc_allowed "$service"; then
-    log "${name}: already granted."
-    return 0
-  fi
-  warn "${name} is not confirmed granted to Hammerspoon."
-  warn "Opening System Settings -> Privacy & Security -> ${name}..."
-  open "$pane_url"
-  echo
-  read -rp "Toggle Hammerspoon ON for ${name}, then press Enter to continue: " _
-  if tcc_allowed "$service"; then
-    log "${name}: confirmed granted."
-  else
-    warn "${name}: still not confirmed granted."
-    warn "  If you definitely toggled it on, this may just be a detection limitation (this check needs Full"
-    warn "  Disk Access for your terminal to read TCC.db reliably) rather than a real problem — the final"
-    warn "  checks below will tell you for sure whether things actually work."
-  fi
-}
-
-require_permission "Accessibility" "kTCCServiceAccessibility" \
-  "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-
-# --- 8b. Microphone permission ---------------------------------------------------
-#
-# THE BUG THIS REPLACES: this step used to open the Microphone pane and
-# block on "Toggle Hammerspoon ON for Microphone, then press Enter" — which
-# is impossible to satisfy. Unlike Accessibility, the Microphone pane has no
-# "+" button; it only lists apps that have ALREADY REQUESTED access. Before
-# Hammerspoon's config has ever tried to open the mic, it cannot appear in
-# that list, so there is nothing there to toggle. A user following the old
-# instructions correctly has no choice but to Ctrl-C out.
-#
-# The fix lives in client/init.lua: it now probes the microphone itself at
-# config load (which already happened when Hammerspoon (re)started in step
-# 7, above) — that's what actually raises the consent dialog, attributed to
-# Hammerspoon, because rec runs as its child process. All this step can
-# do is wait for init.lua to report the outcome, and it deliberately does
-# NOT run its own rec probe to check: a shell-side probe would test THIS
-# TERMINAL's microphone grant, a different permission that would produce a
-# confidently wrong answer either way. See check_mic_permission() above for
-# why reading MIC_STATUS_FILE is the only trustworthy option.
-
-MIC_STATUS_FILE="$CONFIG_DIR/.hark-mic-status"
-MIC_STATUS_TIMEOUT_S=30
-
-log "Waiting for Hammerspoon's microphone probe (up to ${MIC_STATUS_TIMEOUT_S}s)..."
-echo "A Microphone permission dialog should appear on its own in a moment —"
-echo "click Allow. This is triggered by init.lua actually trying to open the"
-echo "mic; it's also the only way to make Hammerspoon show up in System"
-echo "Settings -> Privacy & Security -> Microphone in the first place."
-echo
-
-MIC_STATUS=""
-for _ in $(seq 1 "$MIC_STATUS_TIMEOUT_S"); do
-  if [[ -f "$MIC_STATUS_FILE" ]]; then
-    MIC_STATUS="$(head -n 1 "$MIC_STATUS_FILE" 2>/dev/null || true)"
-    if [[ -n "$MIC_STATUS" ]]; then
-      break
-    fi
-  fi
-  sleep 1
-done
-
-case "$MIC_STATUS" in
-  ok)
-    log "Microphone: confirmed working — Hammerspoon's probe captured real audio."
-    ;;
-  denied)
-    warn "Microphone: Hammerspoon's probe got no audio (permission denied, or the dialog was dismissed/missed)."
-    warn "Fix: System Settings -> Privacy & Security -> Microphone -> turn ON Hammerspoon."
-    warn "  (Hammerspoon WILL be listed there now — it has finally asked.)"
-    warn "Then re-run: ./install-client.sh --doctor"
-    ;;
-  *)
-    warn "Microphone: no result from Hammerspoon within ${MIC_STATUS_TIMEOUT_S}s (expected at ${MIC_STATUS_FILE})."
-    warn "  Open the Hammerspoon console (menu bar icon -> Console) and check for errors."
-    warn "  Then run: ./install-client.sh --doctor"
-    ;;
+case "$MODE" in
+  doctor)    run_doctor; exit $? ;;
+  uninstall) run_uninstall; exit 0 ;;
 esac
 
-# --- 9. Final diagnostics -------------------------------------------------------
-#
-# Same checks `--doctor` runs. This is the whole point of the fix: the installer
-# must never again print "done" while the hotkey is actually dead.
+log "building the agent"
+(cd "$REPO_DIR/swift" && swift build -c release && bash Packaging/build-app.sh)
 
-echo
-log "Running final checks (same as ./install-client.sh --doctor)..."
-if run_diagnostics; then
-  cat <<'EOF'
+log "installing to $APP_DST"
+mkdir -p "$APP_DIR"
+# Replaced wholesale rather than copied over: a stale file left inside the
+# bundle invalidates the signature, and the failure surfaces much later as an
+# unexplained TCC re-prompt.
+rm -rf "$APP_DST"
+cp -R "$APP_SRC" "$APP_DST"
 
-==============================================================================
-SETUP COMPLETE.
+# Must run AFTER the copy (it hashes the installed bundle) and BEFORE the agent
+# restarts, so the agent's prompt lands on a cleared entry rather than a stale
+# one that claims to be granted already.
+reset_stale_grants_on_identity_change
 
-HOTKEY: hold Ctrl + Alt + Space — ALL THREE KEYS TOGETHER, not the spacebar
-alone. Release when you're done speaking.
+resolve_config
 
-Test it for real: mosh into the server, put your cursor at a shell prompt,
-hold Ctrl+Alt+Space, say a short sentence, release. Expected: the sentence
-appears at the prompt within a couple of seconds — NOT executed.
+if [[ "$KEEP_HAMMERSPOON" -eq 0 ]] && pgrep -x Hammerspoon >/dev/null 2>&1; then
+  warn "Hammerspoon is running and owns Ctrl+Alt+Space — quitting it so the agent can register."
+  warn "Pass --keep-hammerspoon to leave it alone (the agent will then fail to bind the hotkey)."
+  osascript -e 'quit app "Hammerspoon"' 2>/dev/null || true
+  sleep 1
+fi
 
-If anything ever stops working, run this first:  ./install-client.sh --doctor
-==============================================================================
-EOF
+# Cleared BEFORE the agent restarts, so the wait below observes THIS run's
+# probe rather than instantly succeeding on the previous run's file.
+rm -f "$STATUS_JSON"
+
+write_plist
+reload_agent
+
+# Wait for the agent's microphone probe to report, rather than sleeping a
+# fixed interval. The probe cannot finish until the user has answered the
+# consent dialog, so any fixed wait either races a human or pads every
+# already-granted re-run. A 3s sleep here reported a spurious FAIL on the
+# first install, with the prompt still on screen.
+printf '==> waiting for the microphone probe (answer the prompt if one appears)'
+probe_started_at="$(date +%s)"
+while [[ ! -f "$STATUS_JSON" ]]; do
+  if [[ $(($(date +%s) - probe_started_at)) -ge 45 ]]; then
+    printf '\n'
+    warn "the probe did not report within 45s — the doctor below may be stale"
+    break
+  fi
+  printf '.'
+  sleep 1
+done
+printf '\n'
+
+printf '\n'
+if run_doctor; then
+  printf '\n'
+  log "setup complete — hold Ctrl+Alt+Space and speak."
 else
-  echo
-  err "Setup wrote all the files, but the checks above found real problems —"
-  err "the hotkey will NOT work yet. Fix the FAILs above (each names its exact"
-  err "fix), then re-run:  ./install-client.sh --doctor"
+  printf '\n'
+  warn "setup finished with failing checks — see the fixes above."
+  warn "Both permission prompts only appear once the agent asks, so re-run"
+  warn "./install-client.sh --doctor after granting them."
   exit 1
 fi
