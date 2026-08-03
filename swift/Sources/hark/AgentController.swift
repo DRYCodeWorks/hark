@@ -156,7 +156,21 @@ public final class AgentController: NSObject {
 
     // MARK: - Paste
 
-    private func apply(_ text: String) {
+    private func apply(_ transcript: String) {
+        // A trailing space, so consecutive dictations do not run together.
+        //
+        // The server sanitiser ends with .strip(), and Whisper's own leading
+        // space goes with it — correct for an API, which should return the
+        // transcript and not presentation whitespace. But two dictations into
+        // the same field then paste as "one, two, three.one, two, three." with
+        // nothing between them. Long-standing; the Lua client did the same.
+        //
+        // Trailing rather than leading: a leading space would open an empty
+        // field with whitespace, and there is no reliable way to read what sits
+        // immediately before the cursor to decide. Trailing is occasionally
+        // redundant and never wrong.
+        let text = transcript + " "
+
         // Set the pasteboard and verify the write before synthesising ⌘V.
         let pb = NSPasteboard.general
         pb.clearContents()
@@ -164,7 +178,7 @@ public final class AgentController: NSObject {
             alert("hark: could not write to the pasteboard — not pasting.")
             return
         }
-        log.info("pasting \(text.count) chars")
+        log.info("pasting \(transcript.count) chars")
         // Paste-target policy: never type into whatever gained focus since release.
         if frontmostAppName() != frontmostAtRelease {
             brief("transcript is on the clipboard — paste withheld (focus moved)")
