@@ -1,8 +1,8 @@
-# hark
+# tacet
 
-[![CI](https://github.com/DRYCodeWorks/hark/actions/workflows/ci.yml/badge.svg)](https://github.com/DRYCodeWorks/hark/actions/workflows/ci.yml)
+[![CI](https://github.com/DRYCodeWorks/tacet/actions/workflows/ci.yml/badge.svg)](https://github.com/DRYCodeWorks/tacet/actions/workflows/ci.yml)
 
-![hark — an audio waveform resolving into the word "hark" followed by a terminal cursor](docs/hark-social.png)
+![tacet — an audio waveform resolving into the word "tacet" followed by a terminal cursor](docs/tacet-social.png)
 
 Push-to-talk dictation into whatever has focus — most usefully a terminal
 session reached over SSH or mosh, but really anywhere: Slack, a browser, any
