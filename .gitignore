@@ -12,7 +12,7 @@ __pycache__/
 # rendered plist contains the invoking user's absolute paths and bind address.
 launchd/*.plist
 
-# A real config, if anyone puts one here instead of ~/.config/hark/.
+# A real config, if anyone puts one here instead of ~/.config/tacet/.
 # config.example.toml is the tracked one.
 config.toml
 
@@ -23,4 +23,7 @@ LAPTOP-MIGRATION.local.md
 swift/.build/
 
 # Generated app bundle (rebuilt by swift/Packaging/build-app.sh).
-swift/Packaging/Hark.app/
+swift/Packaging/Tacet.app/
+
+# Stray build output. The packaging script regenerates this.
+build/

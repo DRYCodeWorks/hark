@@ -1,11 +1,11 @@
-# hark configuration — copy to ~/.config/hark/config.toml
+# tacet configuration — copy to ~/.config/tacet/config.toml
 #
 # Every value here has a working default. An absent config file gives you the
 # single-machine setup: record, transcribe and paste on one Mac, bound to
 # loopback. You only need this file to change something.
 
 [server]
-# Where `hark` listens. Loopback is the default and is correct for a
+# Where `tacet` listens. Loopback is the default and is correct for a
 # single machine.
 #
 # For the two-machine setup (laptop records, desktop transcribes), set this to
@@ -42,7 +42,7 @@ prompt = ""
 # famously "Thank you." — on a silent recording.
 #
 # The 150 default was calibrated against synthetic audio, not a real
-# microphone. `hark` logs the measured rms on every request, so if it is
+# microphone. `tacet` logs the measured rms on every request, so if it is
 # rejecting real speech (or accepting silence), read the log and pick a value
 # from your own numbers rather than guessing.
 silence_rms_threshold = 150.0

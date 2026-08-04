@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   test:
-    # hark only runs on macOS, but the suite is portable and Linux is the
+    # tacet only runs on macOS, but the suite is portable and Linux is the
     # faster signal. Both are here because the scripted checks are shell, and
     # GNU and BSD awk/grep are exactly where a passing test stops meaning
     # anything on the machine a user actually installs to.
@@ -60,14 +60,14 @@ jobs:
       - name: Test
         run: cd swift && swift test
 
-      - name: Build Hark.app
+      - name: Build Tacet.app
         run: cd swift && swift build -c release && bash Packaging/build-app.sh
 
       - name: Verify the signature
-        run: codesign --verify --strict --verbose=2 swift/Packaging/Hark.app
+        run: codesign --verify --strict --verbose=2 swift/Packaging/Tacet.app
 
       - name: Verify the microphone entitlement survived signing
         run: |
-          codesign -d --entitlements - --xml swift/Packaging/Hark.app 2>/dev/null \
+          codesign -d --entitlements - --xml swift/Packaging/Tacet.app 2>/dev/null \
             | grep -q 'com.apple.security.device.audio-input' \
             || { echo "missing audio-input entitlement — TCC will refuse to prompt"; exit 1; }

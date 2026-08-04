@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "Hark",
+    name: "Tacet",
     platforms: [.macOS(.v13)],
     products: [
-        .executable(name: "hark", targets: ["hark"])
+        .executable(name: "tacet", targets: ["tacet"])
     ],
     targets: [
         // Pure / server-logic core: config, key, sanitize, wav, server, whisper.
-        .target(name: "HarkCore"),
+        .target(name: "TacetCore"),
         // macOS agent: hotkey, recorder, dictate client, controller. Kept out
-        // of HarkCore so tests run headless in CI (no TCC, no hardware).
-        .executableTarget(name: "hark", dependencies: ["HarkCore"]),
-        .testTarget(name: "HarkCoreTests", dependencies: ["HarkCore"]),
+        // of TacetCore so tests run headless in CI (no TCC, no hardware).
+        .executableTarget(name: "tacet", dependencies: ["TacetCore"]),
+        .testTarget(name: "TacetCoreTests", dependencies: ["TacetCore"]),
     ]
 )

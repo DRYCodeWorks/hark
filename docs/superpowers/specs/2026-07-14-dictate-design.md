@@ -1,5 +1,5 @@
 > **Historical document.** Written 2026-07-14, before the tool was renamed
-> to `hark`. It says `dictate` and `dictated` throughout, and its first half
+> to `tacet`. It says `dictate` and `dictated` throughout, and its first half
 > describes a server-side tmux-injection design that was abandoned — see the
 > "REVISED" section for why. Kept as the rationale record; the shipped naming
 > is in the README.
@@ -97,7 +97,7 @@ laptop (8 GB)                     server machine (M4 Max, 64 GB)
   └─► ffmpeg records mic → 16 kHz mono WAV
 ⌃⌥Space released
   └─► POST /dictate ──[tailnet]──►  dictated  (HTTP service)
-        X-Hark-Key                    │
+        X-Tacet-Key                    │
         Content-Type: audio/wav          ├─► RMS energy gate (silence → "")
                                          ├─► whisper-server (model resident)
                                          └─► sanitize (collapse to one line)

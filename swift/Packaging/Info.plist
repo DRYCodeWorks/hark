@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>com.drycodeworks.hark-agent</string>
+	<string>com.drycodeworks.tacet-agent</string>
 	<key>CFBundleName</key>
-	<string>Hark</string>
+	<string>Tacet</string>
 	<key>CFBundleExecutable</key>
-	<string>hark</string>
+	<string>tacet</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -19,9 +19,9 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Hark records your voice while you hold the dictate hotkey, to transcribe it.</string>
+	<string>Tacet records your voice while you hold the dictate hotkey, to transcribe it.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Hark talks to the transcription server on your local network.</string>
+	<string>Tacet talks to the transcription server on your local network.</string>
 	<!-- ATS cannot express this app's actual policy, so the app enforces its
 	     own and ATS is opened to let it.
 

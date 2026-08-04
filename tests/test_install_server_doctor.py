@@ -19,8 +19,8 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "install-server.sh"
 
-HARK = "com.drycodeworks.hark"
-WHISPER = "com.drycodeworks.hark-whisper"
+TACET = "com.drycodeworks.tacet"
+WHISPER = "com.drycodeworks.tacet-whisper"
 
 HEADER = "PID\tStatus\tLabel"
 
@@ -79,7 +79,7 @@ def run_verify_model(path: Path, expected_sha: str) -> tuple[int, str]:
 
 
 class TestVerifyModel:
-    """The model is the one thing hark downloads and then feeds to another
+    """The model is the one thing tacet downloads and then feeds to another
     program, so its checksum is a security control — and an untested one is
     how the wildcard-bind guard ended up asserted only in a suite that
     install-server.sh never ran.
@@ -145,10 +145,10 @@ class TestServerInstalled:
     """
 
     def _bundle(self, tmp_path: Path, *, executable: bool = True) -> Path:
-        app = tmp_path / "Hark.app"
+        app = tmp_path / "Tacet.app"
         (app / "Contents" / "MacOS").mkdir(parents=True)
-        binary = app / "Contents" / "MacOS" / "hark"
-        binary.write_text("#!/bin/sh\necho 'usage: hark <serve|agent>' >&2\nexit 2\n")
+        binary = app / "Contents" / "MacOS" / "tacet"
+        binary.write_text("#!/bin/sh\necho 'usage: tacet <serve|agent>' >&2\nexit 2\n")
         binary.chmod(0o755 if executable else 0o644)
         return app
 
@@ -186,7 +186,7 @@ def test_sourcing_the_script_installs_nothing():
 
 
 def test_both_services_loaded_passes():
-    status, out = run_check(listing(HARK, WHISPER))
+    status, out = run_check(listing(TACET, WHISPER))
     assert status == 0, out
     assert "FAIL" not in out
 
@@ -197,12 +197,12 @@ def test_neither_service_loaded_fails():
     assert out.count("FAIL") == 2
 
 
-@pytest.mark.parametrize("loaded,missing", [(WHISPER, HARK), (HARK, WHISPER)])
+@pytest.mark.parametrize("loaded,missing", [(WHISPER, TACET), (TACET, WHISPER)])
 def test_one_service_loaded_does_not_pass_the_other(loaded, missing):
     """The label-prefix trap.
 
-    `com.drycodeworks.hark` is a prefix of `com.drycodeworks.hark-whisper`, so
-    a substring match reports the hark service as loaded whenever only the ASR
+    `com.drycodeworks.tacet` is a prefix of `com.drycodeworks.tacet-whisper`, so
+    a substring match reports the tacet service as loaded whenever only the ASR
     service is running. That is exactly the case where the user needs the
     truth: /health is unreachable, and a PASS here sends them looking at the
     network instead of at the service that is actually down.
@@ -216,7 +216,7 @@ def test_one_service_loaded_does_not_pass_the_other(loaded, missing):
 def test_a_label_that_merely_contains_ours_is_not_a_match():
     # Nothing ships such a label today; this pins the matcher to whole fields
     # so a future rename cannot silently reintroduce prefix matching.
-    status, out = run_check(listing("com.example.com.drycodeworks.hark.backup"))
+    status, out = run_check(listing("com.example.com.drycodeworks.tacet.backup"))
     assert status != 0
     assert out.count("FAIL") == 2
 
@@ -231,7 +231,7 @@ class TestPlistRendering:
     """
 
     def _render(self, tmp_path: Path, config: str) -> tuple[int, dict[str, str]]:
-        cfg_dir = tmp_path / ".config" / "hark"
+        cfg_dir = tmp_path / ".config" / "tacet"
         cfg_dir.mkdir(parents=True)
         (cfg_dir / "config.toml").write_text(config)
         agents = tmp_path / "Library" / "LaunchAgents"
@@ -240,7 +240,7 @@ class TestPlistRendering:
         source {SCRIPT}
         CONFIG_FILE="{cfg_dir}/config.toml"
         LAUNCH_AGENTS="{agents}"
-        APP_DST="{tmp_path}/Hark.app"
+        APP_DST="{tmp_path}/Tacet.app"
         MODEL_PATH="{tmp_path}/model.bin"
         render_plists
         """
@@ -254,8 +254,8 @@ class TestPlistRendering:
     def test_both_plists_are_rendered(self, tmp_path):
         rc, plists = self._render(tmp_path, self.ONE_MACHINE)
         assert rc == 0
-        assert set(plists) == {"com.drycodeworks.hark.plist",
-                               "com.drycodeworks.hark-whisper.plist"}
+        assert set(plists) == {"com.drycodeworks.tacet.plist",
+                               "com.drycodeworks.tacet-whisper.plist"}
 
     def test_no_placeholder_survives(self, tmp_path):
         _, plists = self._render(tmp_path, self.ONE_MACHINE)
@@ -266,29 +266,29 @@ class TestPlistRendering:
     def test_the_port_matches_config(self, tmp_path):
         cfg = '[server]\nbind = "127.0.0.1"\nport = 9111\n\n[whisper]\nport = 9110\n'
         _, plists = self._render(tmp_path, cfg)
-        assert "9110" in plists["com.drycodeworks.hark-whisper.plist"]
+        assert "9110" in plists["com.drycodeworks.tacet-whisper.plist"]
 
     def test_whisper_stays_on_loopback(self, tmp_path):
         # whisper handles raw audio. It must never be reachable off-box, and
         # its host is deliberately not configurable.
         cfg = '[server]\nbind = "100.64.66.46"\nport = 8911\n\n[whisper]\nport = 8910\n'
         _, plists = self._render(tmp_path, cfg)
-        w = plists["com.drycodeworks.hark-whisper.plist"]
+        w = plists["com.drycodeworks.tacet-whisper.plist"]
         assert "127.0.0.1" in w
         assert "100.64.66.46" not in w, "the tailnet address leaked into whisper's plist"
 
     def test_the_plist_points_at_the_installed_bundle_not_the_clone(self, tmp_path):
         _, plists = self._render(tmp_path, self.ONE_MACHINE)
-        hark = plists["com.drycodeworks.hark.plist"]
-        assert str(tmp_path / "Hark.app") in hark
-        assert "/swift/Packaging/" not in hark, "points into the build tree, not the install"
+        tacet = plists["com.drycodeworks.tacet.plist"]
+        assert str(tmp_path / "Tacet.app") in tacet
+        assert "/swift/Packaging/" not in tacet, "points into the build tree, not the install"
 
     def test_it_runs_the_serve_role(self, tmp_path):
         _, plists = self._render(tmp_path, self.ONE_MACHINE)
-        assert "<string>serve</string>" in plists["com.drycodeworks.hark.plist"]
+        assert "<string>serve</string>" in plists["com.drycodeworks.tacet.plist"]
 
     def test_the_server_plist_carries_no_address(self, tmp_path):
-        """`hark serve` reads config.toml itself, so the plist encodes nothing.
+        """`tacet serve` reads config.toml itself, so the plist encodes nothing.
 
         uvicorn needed --host and --port baked into the plist, which is exactly
         what the old drift guard existed to police: two copies of the same fact
@@ -296,9 +296,9 @@ class TestPlistRendering:
         """
         cfg = '[server]\nbind = "100.64.66.46"\nport = 9911\n\n[whisper]\nport = 8910\n'
         _, plists = self._render(tmp_path, cfg)
-        hark = plists["com.drycodeworks.hark.plist"]
-        assert "100.64.66.46" not in hark
-        assert "9911" not in hark
+        tacet = plists["com.drycodeworks.tacet.plist"]
+        assert "100.64.66.46" not in tacet
+        assert "9911" not in tacet
 
     def test_no_working_directory_is_set(self, tmp_path):
         # A WorkingDirectory would make the service depend on a path that can
@@ -309,7 +309,7 @@ class TestPlistRendering:
 
     @pytest.mark.parametrize("host", ["0.0.0.0", "::"])
     def test_a_wildcard_bind_is_refused_at_render(self, tmp_path, host):
-        # `hark serve` also refuses this, but launchd answers that with a crash
+        # `tacet serve` also refuses this, but launchd answers that with a crash
         # loop — catching it here is the difference between a message and a
         # restart storm.
         cfg = f'[server]\nbind = "{host}"\nport = 8911\n\n[whisper]\nport = 8910\n'

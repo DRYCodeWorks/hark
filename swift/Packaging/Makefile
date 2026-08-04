@@ -1,8 +1,8 @@
-# Makefile for Hark — build, package, sign, verify, clean, test.
+# Makefile for Tacet — build, package, sign, verify, clean, test.
 # Rules use tabs (this file is written with tab-indented recipe lines).
 
 PKG_DIR := Packaging
-APP     := $(PKG_DIR)/Hark.app
+APP     := $(PKG_DIR)/Tacet.app
 
 .PHONY: build app sign verify clean test
 
@@ -10,13 +10,13 @@ APP     := $(PKG_DIR)/Hark.app
 build:
 	swift build -c release
 
-## app: run the packaging script (build release + assemble + sign Hark.app)
+## app: run the packaging script (build release + assemble + sign Tacet.app)
 app:
 	./$(PKG_DIR)/build-app.sh
 
-## sign: re-sign the assembled bundle (ad-hoc unless HARK_SIGN_IDENTITY is set)
+## sign: re-sign the assembled bundle (ad-hoc unless TACET_SIGN_IDENTITY is set)
 sign:
-	codesign --force --deep --sign "$${HARK_SIGN_IDENTITY:--}" \
+	codesign --force --deep --sign "$${TACET_SIGN_IDENTITY:--}" \
 		--options runtime \
 		--entitlements $(PKG_DIR)/entitlements.plist \
 		$(APP)

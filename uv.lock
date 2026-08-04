@@ -12,7 +12,7 @@ wheels = [
 ]
 
 [[package]]
-name = "hark"
+name = "tacet"
 version = "0.1.0"
 source = { virtual = "." }
 

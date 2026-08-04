@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# hark — server setup.
+# tacet — server setup.
 #
 # Run this on the Mac that will do the transcribing. On a single-machine
 # setup that is the same Mac you dictate from; on a two-machine setup it is
@@ -8,11 +8,11 @@
 #
 #   1. installs whisper-cpp and uv via Homebrew if missing
 #   2. downloads a Whisper model (skipped if one is already there)
-#   3. installs the hark package into ~/.local/share/hark/venv, which is what
+#   3. installs the tacet package into ~/.local/share/tacet/venv, which is what
 #      launchd actually runs — the clone is for editing, not for serving
-#   4. generates the shared secret at ~/.config/hark/key (mode 600) so
+#   4. generates the shared secret at ~/.config/tacet/key (mode 600) so
 #      install-client.sh has something to read
-#   5. renders both launchd plists from ~/.config/hark/config.toml
+#   5. renders both launchd plists from ~/.config/tacet/config.toml
 #   6. boots the services out and back in
 #   7. waits for /health and refuses to claim success if it never answers
 #
@@ -25,20 +25,20 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_DIR="$HOME/.config/hark"
+CONFIG_DIR="$HOME/.config/tacet"
 CONFIG_FILE="$CONFIG_DIR/config.toml"
 KEY_FILE="$CONFIG_DIR/key"
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
-LABELS=(com.drycodeworks.hark com.drycodeworks.hark-whisper)
+LABELS=(com.drycodeworks.tacet com.drycodeworks.tacet-whisper)
 
 # Where the running service lives. The clone is
 # a place to edit code; a daemon that runs out of it breaks when the checkout
 # moves and silently changes behaviour on `git pull`.
 APP_DIR="$HOME/Applications"
-APP_DST="$APP_DIR/Hark.app"
+APP_DST="$APP_DIR/Tacet.app"
 
 # Minimal TOML reader for the three scalars the plists need. Deliberately not a
-# parser: config.toml is two tables of scalars, and `hark serve` is the thing
+# parser: config.toml is two tables of scalars, and `tacet serve` is the thing
 # that actually validates it.
 config_value() {
   local table="$1" key="$2" default="$3"
@@ -57,7 +57,7 @@ MODEL_NAME="ggml-large-v3-turbo.bin"
 # Changing the model is these three lines, together. The revision is pinned
 # rather than tracking `main` because `resolve/main` is a mutable ref: what it
 # serves today and what it served last month are not guaranteed to be the same
-# bytes, and nothing downstream would notice. This is the only place hark
+# bytes, and nothing downstream would notice. This is the only place tacet
 # fetches something it then executes against, so it is the one trust boundary
 # that was implicit — every other one in this project is explicit.
 #
@@ -69,7 +69,7 @@ MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/${MODEL_REVISION
 
 # Kept as a cheap pre-check before the expensive one. A truncated download is
 # worse than a missing one: whisper-server starts, fails to load the model, and
-# the failure surfaces as an unhelpful 503 from hark.
+# the failure surfaces as an unhelpful 503 from tacet.
 MODEL_MIN_BYTES=$((500 * 1024 * 1024))
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -99,7 +99,7 @@ doctor_fail() {
 # own machine cannot reach itself at that address anyway. Probing the bind
 # address from here reported the service as down while it was serving the other
 # machine perfectly.
-hark_url() {
+tacet_url() {
   printf 'http://127.0.0.1:%s' "$(config_value server port 8911)"
 }
 
@@ -109,9 +109,9 @@ hark_url() {
 
 # The plist names an absolute path inside the bundle. If it is missing or its
 # signature is broken, launchd's only account is a restart loop and a spawn
-# error in /tmp/hark.err — so check it here, where the message can say what to do.
+# error in /tmp/tacet.err — so check it here, where the message can say what to do.
 check_server_installed() {
-  if [[ ! -x "$APP_DST/Contents/MacOS/hark" ]]; then
+  if [[ ! -x "$APP_DST/Contents/MacOS/tacet" ]]; then
     doctor_fail "the server is installed at ${APP_DST}" \
       "re-run ./install-server.sh (launchd runs that bundle, not this clone)"
     return 1
@@ -167,8 +167,8 @@ check_services_loaded() {
   # reads as "not loaded" no matter what is actually running.
   listing="$(service_listing)"
   for label in "${LABELS[@]}"; do
-    # Match the LABEL FIELD exactly. `com.drycodeworks.hark` is a prefix of
-    # `com.drycodeworks.hark-whisper`, so a substring grep reported the hark
+    # Match the LABEL FIELD exactly. `com.drycodeworks.tacet` is a prefix of
+    # `com.drycodeworks.tacet-whisper`, so a substring grep reported the tacet
     # service as loaded whenever only the ASR service was — a confident PASS
     # on precisely the run where the user needed to be told which of the two
     # is down. awk compares whole fields, so it also needs no regex escaping
@@ -186,14 +186,14 @@ check_services_loaded() {
 
 check_health() {
   local url status
-  url="$(hark_url)/health"
+  url="$(tacet_url)/health"
   status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null || true)"
   if [[ "$status" == "200" ]]; then
     doctor_pass "${url} answers 200"
     return 0
   fi
   doctor_fail "${url} answers 200 (got: ${status:-no response})" \
-    "check /tmp/hark.err and /tmp/hark-whisper.err"
+    "check /tmp/tacet.err and /tmp/tacet-whisper.err"
   return 1
 }
 
@@ -223,7 +223,7 @@ verify_model() {
 
 
 run_doctor() {
-  log "hark --doctor: read-only checks, nothing is modified."
+  log "tacet --doctor: read-only checks, nothing is modified."
   DOCTOR_FAILURES=0
   check_server_installed || true
   check_model      || true
@@ -246,13 +246,13 @@ render_plists() {
   mkdir -p "$LAUNCH_AGENTS"
   
   BIND="$(config_value server bind 127.0.0.1)"
-  # Refused here as well as in `hark serve`. The server exits with an
+  # Refused here as well as in `tacet serve`. The server exits with an
   # explanation, but launchd answers that with a crash loop, so catching it at
   # render is the difference between a message and a restart storm.
   case "$(printf '%s' "$BIND" | tr -d '[:space:]')" in
     0.0.0.0|::|"")
       err "server.bind is \"${BIND}\", which listens on every network interface."
-      err "hark's response is pasted into whatever has focus, so this lets anyone"
+      err "tacet's response is pasted into whatever has focus, so this lets anyone"
       err "who can reach this machine choose what gets typed."
       err "Use 127.0.0.1, or this machine's private (tailnet/VPN/LAN) address."
       return 1
@@ -262,31 +262,31 @@ render_plists() {
   WHISPER_PORT="$(config_value whisper port 8910)"
   WHISPER_BIN="$(command -v whisper-server || echo /opt/homebrew/bin/whisper-server)"
   
-  cat > "$LAUNCH_AGENTS/com.drycodeworks.hark.plist" <<PLIST
+  cat > "$LAUNCH_AGENTS/com.drycodeworks.tacet.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>Label</key><string>com.drycodeworks.hark</string>
+	<key>Label</key><string>com.drycodeworks.tacet</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>${APP_DST}/Contents/MacOS/hark</string>
+		<string>${APP_DST}/Contents/MacOS/tacet</string>
 		<string>serve</string>
 	</array>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>
-	<key>StandardOutPath</key><string>/tmp/hark.log</string>
-	<key>StandardErrorPath</key><string>/tmp/hark.err</string>
+	<key>StandardOutPath</key><string>/tmp/tacet.log</string>
+	<key>StandardErrorPath</key><string>/tmp/tacet.err</string>
 </dict>
 </plist>
 PLIST
   
-  cat > "$LAUNCH_AGENTS/com.drycodeworks.hark-whisper.plist" <<PLIST
+  cat > "$LAUNCH_AGENTS/com.drycodeworks.tacet-whisper.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>Label</key><string>com.drycodeworks.hark-whisper</string>
+	<key>Label</key><string>com.drycodeworks.tacet-whisper</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>${WHISPER_BIN}</string>
@@ -301,13 +301,13 @@ PLIST
 	</array>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>
-	<key>StandardOutPath</key><string>/tmp/hark-whisper.log</string>
-	<key>StandardErrorPath</key><string>/tmp/hark-whisper.err</string>
+	<key>StandardOutPath</key><string>/tmp/tacet-whisper.log</string>
+	<key>StandardErrorPath</key><string>/tmp/tacet-whisper.err</string>
 </dict>
 </plist>
 PLIST
   
-  log "Rendered both plists (hark: ${BIND}:${PORT}, whisper: 127.0.0.1:${WHISPER_PORT})"
+  log "Rendered both plists (tacet: ${BIND}:${PORT}, whisper: 127.0.0.1:${WHISPER_PORT})"
 }
 
 # line only runs when the script is executed directly.
@@ -325,7 +325,7 @@ fi
 # ==============================================================================
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  err "hark is macOS-only (launchd, AVAudioEngine, Hammerspoon, TCC)."
+  err "tacet is macOS-only (launchd, AVAudioEngine, Hammerspoon, TCC)."
   exit 1
 fi
 
@@ -371,7 +371,7 @@ fi
 
 # --- 3. Build and install the server ------------------------------------------
 
-# One signed bundle, two roles: `hark serve` here, `hark agent` on whatever Mac
+# One signed bundle, two roles: `tacet serve` here, `tacet agent` on whatever Mac
 # you dictate from. install-client.sh installs the same artifact, so a
 # single-machine setup ends up with one copy that plays both parts.
 if ! command -v swift >/dev/null 2>&1; then
@@ -387,15 +387,15 @@ mkdir -p "$APP_DIR"
 # Replaced wholesale: a stale file left inside the bundle invalidates the
 # signature, and that surfaces much later as an unexplained TCC re-prompt.
 rm -rf "$APP_DST"
-cp -R "$REPO_DIR/swift/Packaging/Hark.app" "$APP_DST"
+cp -R "$REPO_DIR/swift/Packaging/Tacet.app" "$APP_DST"
 
 # Prove it runs before a plist points launchd at it. A binary that cannot
 # start would otherwise surface as a restart loop with nothing in the log.
-# Captured, not piped: `hark` with no arguments prints usage and exits 2 —
+# Captured, not piped: `tacet` with no arguments prints usage and exits 2 —
 # correct behaviour — and under `set -o pipefail` that makes the pipeline fail
 # no matter what grep says, so the check condemned a working binary.
-usage_out="$("$APP_DST/Contents/MacOS/hark" 2>&1 || true)"
-if [[ "$usage_out" != *"usage: hark"* ]]; then
+usage_out="$("$APP_DST/Contents/MacOS/tacet" 2>&1 || true)"
+if [[ "$usage_out" != *"usage: tacet"* ]]; then
   err "installed ${APP_DST} but the binary does not run — aborting."
   err "got: ${usage_out}"
   exit 1
@@ -419,7 +419,7 @@ fi
 # --- 5. Render the plists -----------------------------------------------------
 #
 # Rendered here rather than by a Python module, so the server has no Python at
-# all. The wildcard-bind check is enforced by `hark serve` itself at startup —
+# all. The wildcard-bind check is enforced by `tacet serve` itself at startup —
 # it refuses 0.0.0.0 with an explanation — so this does not re-implement it.
 
 render_plists
@@ -467,7 +467,7 @@ done
 
 # --- 7. Verify ----------------------------------------------------------------
 
-URL="$(hark_url)/health"
+URL="$(tacet_url)/health"
 log "Waiting for ${URL}..."
 for _ in $(seq 1 30); do
   if [[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$URL" 2>/dev/null || true)" == "200" ]]; then
@@ -480,7 +480,7 @@ echo
 if ! run_doctor; then
   echo
   err "Server setup did NOT complete cleanly. Work through the FAIL lines above."
-  err "Logs: /tmp/hark.err (service) and /tmp/hark-whisper.err (ASR engine)."
+  err "Logs: /tmp/tacet.err (service) and /tmp/tacet-whisper.err (ASR engine)."
   exit 1
 fi
 

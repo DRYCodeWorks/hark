@@ -31,7 +31,7 @@ either: agentic CLIs like Claude Code paint their own input box (there is no
 readline buffer for a ZLE widget to hook), and any keybinding evaluated over
 SSH runs on the *remote* host, which has no microphone.
 
-`hark` sidesteps this instead of fighting it. Capture and paste happen on
+`tacet` sidesteps this instead of fighting it. Capture and paste happen on
 the machine you are physically touching, so the pane you are looking at is
 the pane that receives the text. Nothing has to guess a target.
 
@@ -44,8 +44,8 @@ exposed to nothing.
 ⌃⌥Space held
   └─► Recorder (AVAudioEngine) records the mic → 16 kHz mono WAV
 ⌃⌥Space released
-  └─► POST /dictate ─────────────►  hark  (HTTP service)
-        X-Hark-Key                       │
+  └─► POST /dictate ─────────────►  tacet  (HTTP service)
+        X-Tacet-Key                       │
         Content-Type: audio/wav          ├─► RMS energy gate (silence → "")
                                          ├─► whisper-server (model resident)
                                          └─► sanitize (collapse to one line)
@@ -71,13 +71,13 @@ last *typed*, in a tool built to stop you typing.
 The clipboard is deliberately **not** restored after pasting: the transcript
 stays there, so a misfired paste is recoverable with a manual ⌘V instead of
 re-speaking. See the comment above `apply()` in
-`swift/Sources/hark/AgentController.swift` for why this should not be "fixed"
+`swift/Sources/tacet/AgentController.swift` for why this should not be "fixed"
 later.
 
 ## Install
 
 ```bash
-git clone https://github.com/DRYCodeWorks/hark && cd hark
+git clone https://github.com/DRYCodeWorks/tacet && cd tacet
 ./install-server.sh     # transcription side
 ./install-client.sh     # hotkey, mic, paste
 ```
@@ -88,21 +88,21 @@ holds the model and `install-client.sh` on the one you type at.
 ### 1. Server
 
 `./install-server.sh` installs `whisper-cpp` via Homebrew, downloads a model
-(~1.5 GB, skipped if present), builds `swift/` into `~/Applications/Hark.app`,
+(~1.5 GB, skipped if present), builds `swift/` into `~/Applications/Tacet.app`,
 renders both launchd plists from your config, loads them, and waits for
 `/health`. It refuses to report success if the service never answers.
 
 The shared secret is created by the server itself on first start, so there is
 one implementation of how it is generated and persisted.
 
-**The clone is not load-bearing.** launchd runs `hark serve` from
-`~/Applications/Hark.app`, by absolute path and with no `WorkingDirectory`, so
+**The clone is not load-bearing.** launchd runs `tacet serve` from
+`~/Applications/Tacet.app`, by absolute path and with no `WorkingDirectory`, so
 you can move or delete the checkout without breaking the service — and `git
 pull` does not live-patch a running daemon. Upgrading is deliberate: pull, then
 re-run `./install-server.sh`.
 
 It is the same bundle `install-client.sh` installs. One signed binary, two
-roles: `hark serve` here, `hark agent` on whatever Mac you dictate from.
+roles: `tacet serve` here, `tacet agent` on whatever Mac you dictate from.
 
 The model is pinned to a specific upstream revision and verified against a
 recorded SHA-256 before it is moved into place — not tracking a mutable
@@ -114,8 +114,8 @@ re-renders and reloads.
 
 | Service | Binds to | Logs |
 |---|---|---|
-| `com.drycodeworks.hark-whisper` | `127.0.0.1:8910` — loopback only, always | `/tmp/hark-whisper.log`, `/tmp/hark-whisper.err` |
-| `com.drycodeworks.hark` | `127.0.0.1:8911` by default, never `0.0.0.0` | `/tmp/hark.log`, `/tmp/hark.err` |
+| `com.drycodeworks.tacet-whisper` | `127.0.0.1:8910` — loopback only, always | `/tmp/tacet-whisper.log`, `/tmp/tacet-whisper.err` |
+| `com.drycodeworks.tacet` | `127.0.0.1:8911` by default, never `0.0.0.0` | `/tmp/tacet.log`, `/tmp/tacet.err` |
 
 `./install-server.sh --doctor` re-runs the checks alone, read-only.
 
@@ -124,17 +124,17 @@ The plists are **rendered by `install-server.sh`**, never edited by hand.
 and asserts they agree with it — including that the ASR server is never bound
 off loopback.
 
-The server's own plist carries **no address at all**: `hark serve` reads
-`~/.config/hark/config.toml` directly, so there is one copy of that fact rather
+The server's own plist carries **no address at all**: `tacet serve` reads
+`~/.config/tacet/config.toml` directly, so there is one copy of that fact rather
 than two that can disagree. (`uvicorn` needed `--host` baked into the plist,
 which is what the old drift guard existed to police.)
 
 A wildcard bind is refused twice: by `install-server.sh` before a plist is
-written, and by `hark serve` at startup. The second is the real enforcement;
+written, and by `tacet serve` at startup. The second is the real enforcement;
 the first is what turns a launchd crash-loop into a message. Any other address
 is accepted, since the two-machine setup binds to a private one on purpose.
 
-The shared secret lives at `~/.config/hark/key` (mode 600), outside the repo.
+The shared secret lives at `~/.config/tacet/key` (mode 600), outside the repo.
 
 ### 2. Client
 
@@ -150,13 +150,13 @@ For a two-machine setup, pass the server's SSH host to skip the prompt:
 
 It:
 
-1. builds `swift/` into `~/Applications/Hark.app` with SwiftPM and signs it,
+1. builds `swift/` into `~/Applications/Tacet.app` with SwiftPM and signs it,
 2. obtains the shared secret (locally, or over SSH for a two-machine setup),
 3. asks you nothing about microphones — `rec` records the system default
    input, chosen in System Settings → Sound → Input,
-4. writes `~/.config/hark/client.json` (mode 600 — it holds the secret in
+4. writes `~/.config/tacet/client.json` (mode 600 — it holds the secret in
    plaintext),
-5. registers `hark agent` as the LaunchAgent `com.drycodeworks.hark-agent`, so
+5. registers `tacet agent` as the LaunchAgent `com.drycodeworks.tacet-agent`, so
    it starts at login and comes back after a reboot,
 6. waits for the agent's own microphone probe, which is what triggers the
    consent dialog,
@@ -172,10 +172,10 @@ Accessibility — permission to observe every keystroke — was granted to a
 general-purpose scriptable runtime whose config was a symlink into this repo,
 so a `git pull` changed what the grant covered without re-prompting. The native
 agent asks for the same permission with far less behind it.
-See [issue #2](https://github.com/DRYCodeWorks/hark/issues/2).
+See [issue #2](https://github.com/DRYCodeWorks/tacet/issues/2).
 
-`./install-client.sh` migrates you: `~/.hammerspoon/hark-config.lua` is read
-into `~/.config/hark/client.json` and never modified, and Hammerspoon is quit
+`./install-client.sh` migrates you: `~/.hammerspoon/tacet-config.lua` is read
+into `~/.config/tacet/client.json` and never modified, and Hammerspoon is quit
 so the agent can take the hotkey (`Ctrl+Alt+Space` is a system-wide
 registration and exactly one process gets it).
 
@@ -201,7 +201,7 @@ switched ON for a binary nothing trusts.
 ### 3. Configuration
 
 Everything is optional — the defaults are the working single-machine setup.
-Copy `config.example.toml` to `~/.config/hark/config.toml` to change the
+Copy `config.example.toml` to `~/.config/tacet/config.toml` to change the
 bind address, the model path, the silence threshold, or the vocabulary prompt.
 
 The **vocabulary prompt** is the cheapest accuracy win available: proper nouns
@@ -214,8 +214,8 @@ person's noise.
 Read-only — changes nothing, exits non-zero if anything is wrong. Run it any
 time the hotkey stops working, instead of re-running the whole install:
 
-- `Hark.app` is installed, and its signature verifies
-- `~/.config/hark/client.json` exists, is mode 600, has a non-empty key
+- `Tacet.app` is installed, and its signature verifies
+- `~/.config/tacet/client.json` exists, is mode 600, has a non-empty key
 - the agent is loaded in launchd and actually running
 - nothing else is holding `Ctrl+Alt+Space`
 - the agent can reach the microphone
@@ -225,7 +225,7 @@ time the hotkey stops working, instead of re-running the whole install:
 Each `FAIL` line names its exact fix.
 
 **Every permission check reads what the agent itself reported**, from
-`~/.config/hark/status.json` — which the agent rewrites every 30 s, so a stale
+`~/.config/tacet/status.json` — which the agent rewrites every 30 s, so a stale
 file means it died without saying so. Nothing is measured from the outside, and
 that is not incidental:
 
@@ -254,9 +254,9 @@ understand, so they are worth reading before you hit them.
    tells you the transcript is on the clipboard.
 
 2. **Microphone** — `rec` runs as the agent's *child process*, so macOS
-   attributes access to **hark**, not to `rec`. This one is **not**
+   attributes access to **tacet**, not to `rec`. This one is **not**
    pre-grantable: the Microphone pane has **no "+" button**, and lists only
-   apps that have *already requested* access. hark will not appear there —
+   apps that have *already requested* access. tacet will not appear there —
    there is nothing to toggle — until something has actually tried to open the
    mic.
 
@@ -281,7 +281,7 @@ release. The sentence should appear at the prompt within a couple of seconds,
 Useful when the Mac you type on can't spare 1.5 GB for a resident model.
 
 On the transcribing machine, set the bind address in
-`~/.config/hark/config.toml` to a private address it is reachable at —
+`~/.config/tacet/config.toml` to a private address it is reachable at —
 a Tailscale/tailnet IP, a VPN address, or a LAN address you trust — then
 re-render and reload the plists:
 
@@ -290,7 +290,7 @@ re-render and reload the plists:
 bind = "10.x.x.x"     # never 0.0.0.0
 ```
 
-On the recording machine, point `server` in `~/.config/hark/client.json` at
+On the recording machine, point `server` in `~/.config/tacet/client.json` at
 the same address. `install-client.sh` fetches the key over SSH — pass the
 server's SSH host as an argument, or let it prompt.
 
@@ -300,7 +300,7 @@ trusted one.
 
 ## Changing the hotkey
 
-Edit `register()` in `swift/Sources/hark/Hotkey.swift`:
+Edit `register()` in `swift/Sources/tacet/Hotkey.swift`:
 
 ```swift
 RegisterEventHotKey(
@@ -336,34 +336,34 @@ happens" reports are one of its checks, not a deeper bug.
 
 0. **Nothing happened, but `--doctor` passes everything.** Check you're
    pressing **Ctrl+Alt+Space — all three keys together**. Then read
-   `~/Library/Logs/hark-agent.log`: if it shows `pasting N chars`, the
+   `~/Library/Logs/tacet-agent.log`: if it shows `pasting N chars`, the
    transcript reached your clipboard and only the paste failed, which is
    Accessibility.
 1. **Recording produces nothing, or the microphone check FAILs.** A microphone
    permission problem almost every time: System Settings → Privacy & Security
-   → Microphone → **hark** must be ON. If hark isn't listed at all, it hasn't
+   → Microphone → **tacet** must be ON. If tacet isn't listed at all, it hasn't
    successfully asked yet — see the entitlement note above.
 2. **A beep and an alert naming an HTTP status.** The alert names the likely
    cause:
-   - **401** — the key in `~/.config/hark/client.json` doesn't match
-     `~/.config/hark/key` on the server. Re-run `install-client.sh`.
+   - **401** — the key in `~/.config/tacet/client.json` doesn't match
+     `~/.config/tacet/key` on the server. Re-run `install-client.sh`.
    - **415** — a client bug in the `Content-Type` header; shouldn't happen
      with an unmodified agent.
    - **400** — the server rejected the audio; usually the same mic-permission
      issue as #1, caught server-side.
-   - **503** — `whisper-server` is down. Check `/tmp/hark-whisper.err`.
+   - **503** — `whisper-server` is down. Check `/tmp/tacet-whisper.err`.
    - **Negative status / can't reach the server** — connection failure. Check
-     the network path and `launchctl list | grep hark`.
-3. **The server side looks broken.** `tail -f /tmp/hark.log` and
-   `/tmp/hark.err` (server errors, and the length — never the content —
-   of each transcript); `/tmp/hark-whisper.err` for ASR crashes.
+     the network path and `launchctl list | grep tacet`.
+3. **The server side looks broken.** `tail -f /tmp/tacet.log` and
+   `/tmp/tacet.err` (server errors, and the length — never the content —
+   of each transcript); `/tmp/tacet-whisper.err` for ASR crashes.
 4. **It "works" but pastes nothing and says "heard nothing."** Not a bug: the
    audio was too quiet to clear the energy gate. Whisper hallucinates
    confident short phrases — famously "Thank you." — on silence, so this is
    filtered on the *audio*, not on the text. Speak louder or closer, check the
    input device, and see `SILENCE_RMS_THRESHOLD` below.
 
-**`/tmp/hark-agent.err` and `~/.config/hark/status.json` are the load-bearing
+**`/tmp/tacet-agent.err` and `~/.config/tacet/status.json` are the load-bearing
 diagnostics.** The log carries the byte count of each request and the *length* —
 never the content — of each transcript; `status.json` carries the live
 microphone, Accessibility and hotkey state. A flake an hour old otherwise leaves
@@ -372,7 +372,7 @@ no evidence anywhere.
 ## What's been tested, and what hasn't
 
 One person, two Macs, one microphone. CI runs the pytest suite on Linux and
-macOS, shellcheck, and a macOS job that builds `hark.app` and verifies its
+macOS, shellcheck, and a macOS job that builds `tacet.app` and verifies its
 signature. What CI cannot reach is everything the permissions model touches — a
 real microphone, a real TCC grant, a real paste into a real window. Every bug
 found during the agent's first bring-up lived in exactly that gap, and each one
@@ -382,7 +382,7 @@ reported success while being broken. Specifically worth knowing:
 microphone.** `SILENCE_RMS_THRESHOLD = 150.0` sits ~16× above the noise floor
 that produces hallucinated text and ~21× below normal speech, measured with
 `say`-generated audio. It has not misfired in real use, but a different mic in
-a different room may need a different number. `hark` logs the measured rms
+a different room may need a different number. `tacet` logs the measured rms
 on every request precisely so you can calibrate from evidence instead of
 guessing. Aim for ~500+ for headroom.
 
@@ -437,7 +437,7 @@ Nothing on the ffmpeg side fixes this: the avfoundation demuxer exposes no
 audio-format option (every knob it has is video-side), there is no packed
 format on the hardware to pin to, and avfoundation is ffmpeg's only macOS input
 backend. `AVAudioEngine`'s `inputNode` is Float32 by contract, so
-`swift/Sources/hark/Recorder.swift` cannot hit this failure mode.
+`swift/Sources/tacet/Recorder.swift` cannot hit this failure mode.
 
 The first fix attempted — retry ffmpeg when it dies early — was wrong. A
 relaunch renegotiates the same format. Intermittent is not the same as
@@ -449,11 +449,11 @@ transient.
 install-server.sh          transcription side: deps, model, plists, services
 install-client.sh          builds + installs the agent, plus --doctor
 swift/
-  Sources/hark/            the agent — hotkey, capture, paste, overlay
-  Sources/HarkCore/        config, client, WAV, sanitise, the HTTP server
-  Packaging/build-app.sh   assembles and signs Hark.app
+  Sources/tacet/            the agent — hotkey, capture, paste, overlay
+  Sources/TacetCore/        config, client, WAV, sanitise, the HTTP server
+  Packaging/build-app.sh   assembles and signs Tacet.app
   Tests/                   SwiftPM suite (48)
-config.example.toml        shape of ~/.config/hark/config.toml
+config.example.toml        shape of ~/.config/tacet/config.toml
 tests/                     pytest suite — drives the installers as subprocesses
 .github/workflows/ci.yml   pytest + shellcheck + the signed bundle build
 docs/                      design specs

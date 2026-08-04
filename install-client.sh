@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# hark — client setup.
+# tacet — client setup.
 #
 # Run this on the Mac you want to dictate FROM. On a single-machine setup that
 # is the same Mac that runs the server; on a two-machine setup it is the
 # laptop, not the transcribing desktop. It builds swift/ into
-# ~/Applications/Hark.app and registers `hark agent` as a LaunchAgent so it
+# ~/Applications/Tacet.app and registers `tacet agent` as a LaunchAgent so it
 # starts at login.
 #
 #   ./install-client.sh                install or update
@@ -26,7 +26,7 @@
 #
 # Two things this still does for anyone crossing that bridge:
 #
-#   - ~/.hammerspoon/hark-config.lua is read into ~/.config/hark/client.json,
+#   - ~/.hammerspoon/tacet-config.lua is read into ~/.config/tacet/client.json,
 #     if the latter does not exist yet. The old file is never modified.
 #   - Hammerspoon is quit if it is running, because Ctrl+Alt+Space is a
 #     system-wide registration and exactly one process gets it — whichever
@@ -41,30 +41,30 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_SRC="$REPO_DIR/swift/Packaging/Hark.app"
+APP_SRC="$REPO_DIR/swift/Packaging/Tacet.app"
 APP_DIR="$HOME/Applications"
-APP_DST="$APP_DIR/Hark.app"
+APP_DST="$APP_DIR/Tacet.app"
 
-HARK_CONFIG_DIR="$HOME/.config/hark"
-CLIENT_CONFIG="$HARK_CONFIG_DIR/client.json"
-STATUS_JSON="$HARK_CONFIG_DIR/status.json"
+TACET_CONFIG_DIR="$HOME/.config/tacet"
+CLIENT_CONFIG="$TACET_CONFIG_DIR/client.json"
+STATUS_JSON="$TACET_CONFIG_DIR/status.json"
 # The code identity the last install was granted against. See
 # reset_stale_grants_on_identity_change().
-INSTALLED_CDHASH="$HARK_CONFIG_DIR/.agent-cdhash"
-SERVER_KEY="$HARK_CONFIG_DIR/key"
+INSTALLED_CDHASH="$TACET_CONFIG_DIR/.agent-cdhash"
+SERVER_KEY="$TACET_CONFIG_DIR/key"
 
-LEGACY_CONFIG="$HOME/.hammerspoon/hark-config.lua"
+LEGACY_CONFIG="$HOME/.hammerspoon/tacet-config.lua"
 
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
-AGENT_LABEL="com.drycodeworks.hark-agent"
+AGENT_LABEL="com.drycodeworks.tacet-agent"
 AGENT_PLIST="$LAUNCH_AGENTS/$AGENT_LABEL.plist"
 
 DEFAULT_SERVER="http://127.0.0.1:8911/dictate"
 
 # The server's SSH host, for a two-machine setup. Set by a bare argument or
-# HARK_SERVER_HOST; otherwise prompted for, and only when no key is found
+# TACET_SERVER_HOST; otherwise prompted for, and only when no key is found
 # locally. Deliberately separate from the server URL — see fetch_key_over_ssh.
-SERVER_HOST="${HARK_SERVER_HOST:-}"
+SERVER_HOST="${TACET_SERVER_HOST:-}"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
@@ -144,7 +144,7 @@ write_client_config() {
     warn "\"server\" at https://<magicdns-name> — no opt-in needed then."
   fi
 
-  mkdir -p "$HARK_CONFIG_DIR"
+  mkdir -p "$TACET_CONFIG_DIR"
   # 600 BEFORE the secret goes in, so there is no world-readable window.
   : > "$CLIENT_CONFIG"
   chmod 600 "$CLIENT_CONFIG"
@@ -230,7 +230,7 @@ fetch_key_over_ssh() {
     [[ -t 0 ]] || return 1
     {
       echo
-      echo "No key found on this Mac, so hark's server is presumably another one."
+      echo "No key found on this Mac, so tacet's server is presumably another one."
       echo
       echo "If it should be THIS Mac, quit (Ctrl-C) and run ./install-server.sh first."
       echo
@@ -245,13 +245,13 @@ fetch_key_over_ssh() {
   local err_file fetched rc=0
   err_file="$(mktemp)"
 
-  fetched="$(ssh -o ConnectTimeout=10 "$SERVER_HOST" 'cat ~/.config/hark/key' 2>"$err_file")" || rc=$?
+  fetched="$(ssh -o ConnectTimeout=10 "$SERVER_HOST" 'cat ~/.config/tacet/key' 2>"$err_file")" || rc=$?
   if [[ "$rc" -ne 0 ]]; then
     err "could not fetch the key from '${SERVER_HOST}'. Likely causes:"
     err "  - you are not on the same network/tailnet right now"
     err "  - '${SERVER_HOST}' is not the right SSH host/alias for the server"
     err "  - SSH key auth to that host is not set up (if it hung, that is probably it)"
-    err "  - ~/.config/hark/key does not exist there — run ./install-server.sh on it"
+    err "  - ~/.config/tacet/key does not exist there — run ./install-server.sh on it"
     err "ssh said:"
     sed 's/^/    /' "$err_file" >&2 || true
     rm -f "$err_file"
@@ -261,7 +261,7 @@ fetch_key_over_ssh() {
 
   fetched="$(printf '%s' "$fetched" | tr -d '[:space:]')"
   if [[ -z "$fetched" ]]; then
-    err "fetched an EMPTY key from ${SERVER_HOST} — check ~/.config/hark/key there."
+    err "fetched an EMPTY key from ${SERVER_HOST} — check ~/.config/tacet/key there."
     return 1
   fi
   printf '%s' "$fetched"
@@ -302,7 +302,7 @@ reset_stale_grants_on_identity_change() {
   [[ -n "$new_hash" ]] || return 0
   [[ -f "$INSTALLED_CDHASH" ]] && old_hash="$(cat "$INSTALLED_CDHASH")"
 
-  mkdir -p "$HARK_CONFIG_DIR"
+  mkdir -p "$TACET_CONFIG_DIR"
   printf '%s' "$new_hash" > "$INSTALLED_CDHASH"
 
   # First install, or the same binary reinstalled: nothing to invalidate.
@@ -314,7 +314,7 @@ reset_stale_grants_on_identity_change() {
   if tccutil reset Accessibility "$AGENT_LABEL" >/dev/null 2>&1; then
     warn "Cleared the stale entry. You will be asked to grant it again."
   else
-    warn "Could not clear it automatically. Toggle hark OFF and back ON in"
+    warn "Could not clear it automatically. Toggle tacet OFF and back ON in"
     warn "System Settings -> Privacy & Security -> Accessibility."
   fi
 }
@@ -329,7 +329,7 @@ reset_stale_grants_on_identity_change() {
 #
 # ProgramArguments points INSIDE the bundle. That is deliberate and is what
 # keeps TCC attributing the microphone and Accessibility grants to
-# com.drycodeworks.hark-agent: the executable is covered by the bundle's code
+# com.drycodeworks.tacet-agent: the executable is covered by the bundle's code
 # signature, so its identity resolves to the bundle regardless of who exec'd
 # it. `open -a` would work too but gives launchd nothing to supervise.
 
@@ -344,7 +344,7 @@ write_plist() {
 	<string>${AGENT_LABEL}</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>${APP_DST}/Contents/MacOS/hark</string>
+		<string>${APP_DST}/Contents/MacOS/tacet</string>
 		<string>agent</string>
 	</array>
 	<key>RunAtLoad</key>
@@ -352,9 +352,9 @@ write_plist() {
 	<key>ProcessType</key>
 	<string>Interactive</string>
 	<key>StandardOutPath</key>
-	<string>/tmp/hark-agent.out</string>
+	<string>/tmp/tacet-agent.out</string>
 	<key>StandardErrorPath</key>
-	<string>/tmp/hark-agent.err</string>
+	<string>/tmp/tacet-agent.err</string>
 </dict>
 </plist>
 EOF
@@ -396,25 +396,25 @@ reload_agent() {
 
 check_app_installed() {
   if [[ ! -d "$APP_DST" ]]; then
-    doctor_fail "Hark.app is installed" "run ./install-client.sh"
+    doctor_fail "Tacet.app is installed" "run ./install-client.sh"
     return 1
   fi
-  doctor_pass "Hark.app is installed at $APP_DST"
+  doctor_pass "Tacet.app is installed at $APP_DST"
 }
 
 check_signature() {
   if [[ ! -d "$APP_DST" ]]; then
-    doctor_fail "Hark.app has a valid signature" "run ./install-client.sh"
+    doctor_fail "Tacet.app has a valid signature" "run ./install-client.sh"
     return 1
   fi
   if ! codesign --verify --strict "$APP_DST" 2>/dev/null; then
-    doctor_fail "Hark.app has a valid signature" \
+    doctor_fail "Tacet.app has a valid signature" \
       "rebuild it: ./install-client.sh"
     return 1
   fi
   local identity
   identity="$(codesign -dvv "$APP_DST" 2>&1 | grep -E '^Signature=' | cut -d= -f2- || true)"
-  doctor_pass "Hark.app signature is valid (${identity:-unknown})"
+  doctor_pass "Tacet.app signature is valid (${identity:-unknown})"
 }
 
 check_config() {
@@ -440,9 +440,9 @@ check_agent_running() {
     doctor_fail "the agent is loaded in launchd" "run ./install-client.sh"
     return 1
   fi
-  if ! pgrep -f "$APP_DST/Contents/MacOS/hark" >/dev/null 2>&1; then
+  if ! pgrep -f "$APP_DST/Contents/MacOS/tacet" >/dev/null 2>&1; then
     doctor_fail "the agent process is running" \
-      "check /tmp/hark-agent.err and ~/Library/Logs/hark-agent.log"
+      "check /tmp/tacet-agent.err and ~/Library/Logs/tacet-agent.log"
     return 1
   fi
   doctor_pass "the agent is loaded and running"
@@ -496,7 +496,7 @@ check_status_freshness() {
   fi
   if ! status_is_fresh; then
     doctor_fail "the agent's status is current" \
-      "status.json is stale (>120s) — the agent is not running; check /tmp/hark-agent.err"
+      "status.json is stale (>120s) — the agent is not running; check /tmp/tacet-agent.err"
     return 1
   fi
   doctor_pass "the agent is reporting (pid $(status_field pid))"
@@ -509,7 +509,7 @@ check_mic() {
     authorized) doctor_pass "the agent can reach the microphone" ;;
     "")         doctor_fail "the agent can reach the microphone" "no status yet — is the agent running?" ;;
     *)          doctor_fail "the agent can reach the microphone (reported: $v)" \
-                  "System Settings -> Privacy & Security -> Microphone -> turn ON hark" ;;
+                  "System Settings -> Privacy & Security -> Microphone -> turn ON tacet" ;;
   esac
 }
 
@@ -535,7 +535,7 @@ check_accessibility() {
     trusted) doctor_pass "Accessibility is granted" ;;
     "")      doctor_fail "Accessibility is granted" "no status yet — is the agent running?" ;;
     *)       doctor_fail "Accessibility is granted (reported: $v)" \
-               "System Settings -> Privacy & Security -> Accessibility -> turn ON hark, then re-run this" ;;
+               "System Settings -> Privacy & Security -> Accessibility -> turn ON tacet, then re-run this" ;;
   esac
 }
 
@@ -564,12 +564,12 @@ check_health() {
     return 0
   fi
   doctor_fail "server /health reachable ($url)" \
-    "check the tailnet (tailscale status) and that hark is running on the server (ssh <server> launchctl list | grep hark)"
+    "check the tailnet (tailscale status) and that tacet is running on the server (ssh <server> launchctl list | grep tacet)"
   return 1
 }
 
 run_doctor() {
-  printf '\nhark client diagnostics\n\n'
+  printf '\ntacet client diagnostics\n\n'
   check_app_installed || true
   check_signature || true
   check_config || true

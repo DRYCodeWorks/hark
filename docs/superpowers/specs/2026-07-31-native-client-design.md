@@ -1,6 +1,6 @@
 # Native client design — replacing the Hammerspoon Lua client
 
-Issue: [DRYCodeWorks/hark#2](https://github.com/DRYCodeWorks/hark/issues/2)
+Issue: [DRYCodeWorks/tacet#2](https://github.com/DRYCodeWorks/tacet/issues/2)
 Date: 2026-07-31
 Revision: 4. Panel rounds: 6/6 REVISE, then 5 REVISE + 1 APPROVED, then 6/6 REVISE with
 the findings down to two contradictions and a format bug. Rebased onto `8d12f7b`; all line
@@ -9,15 +9,15 @@ numbers re-verified against that commit.
 ## Why
 
 `install-client.sh:595` links `~/.hammerspoon/init.lua` to this repo's `client/init.lua`.
-Hammerspoon has exactly one config file, so installing hark claims it.
+Hammerspoon has exactly one config file, so installing tacet claims it.
 
-The permission story matters more. Accessibility is granted to Hammerspoon, not to hark:
+The permission story matters more. Accessibility is granted to Hammerspoon, not to tacet:
 a general-purpose scriptable Lua runtime holds a grant that can observe every keystroke,
 and its config is a symlink into a git repo, so `git pull` changes what that grant covers
 without re-prompting.
 
 What Hammerspoon buys in return is a **stable signed TCC identity**. Taking that away means
-hark owns the identity problem itself, which is why this design assumes a Developer ID.
+tacet owns the identity problem itself, which is why this design assumes a Developer ID.
 
 ## What earlier revisions got wrong
 
@@ -48,9 +48,9 @@ microphone permission. Both are resolved below.
 |---|---|
 | Signing | Developer ID, hardened runtime, notarised and stapled. CI produces the artifact |
 | Install | `install-client.sh` downloads and verifies a release artifact. It never compiles |
-| App shape | `LSUIElement` bundle, menu bar status item, `~/Applications/Hark.app` (no sudo) |
+| App shape | `LSUIElement` bundle, menu bar status item, `~/Applications/Tacet.app` (no sudo) |
 | Capture | Absorbed in-process; the separate `rec` binary goes away |
-| Config | `client.json` holds the server URL and the insecure-transport allowlist; the key always lives in `~/.config/hark/key` mode 600 |
+| Config | `client.json` holds the server URL and the insecure-transport allowlist; the key always lives in `~/.config/tacet/key` mode 600 |
 | Hotkey | **Undecided.** Phase 0 decides, against the criteria below |
 | Migration | Quit Hammerspoon, offer to revoke all three grants, restore or remove the symlink. Delete nothing else |
 
@@ -107,7 +107,7 @@ about chord ownership without it (see Migration).
 Revisions 1 and 2 treated this as an open risk. It is neither open nor hypothetical:
 inferring microphone permission from a frame count does not work, because a TCC-denied
 device yields substituted silence rather than no frames. It was filed as
-[#9](https://github.com/DRYCodeWorks/hark/issues/9) and fixed in `559aafe` for the current
+[#9](https://github.com/DRYCodeWorks/tacet/issues/9) and fixed in `559aafe` for the current
 Lua client, whose `rec.swift` now says so directly:
 
 > "format negotiation succeeds under denial too. The only way to learn the answer is to
@@ -126,9 +126,9 @@ here.
 ## Architecture
 
 One SPM package. CI runs `swift build` and `swift test`; the release job assembles, signs,
-notarises and staples `Hark.app`.
+notarises and staples `Tacet.app`.
 
-Bundle ID `com.drycodeworks.hark-agent` — a **new** identifier following the existing
+Bundle ID `com.drycodeworks.tacet-agent` — a **new** identifier following the existing
 launchd label style, not an existing label. `Info.plist` carries `LSUIElement`,
 `NSMicrophoneUsageDescription`, `NSLocalNetworkUsageDescription` (needed for the
 two-machine setup on macOS 15+, and separate from ATS), and the ATS keys below.
@@ -178,7 +178,7 @@ The wire format is **16 kHz, mono, 16-bit signed PCM, little-endian, single `dat
 stated explicitly here because `audio.py:22` documents it in a comment while enforcing only
 sample width.
 
-`/tmp/hark.wav` goes away, and with it the stale-file hazard `init.lua:375` guards against.
+`/tmp/tacet.wav` goes away, and with it the stale-file hazard `init.lua:375` guards against.
 `Recorder` builds the 44-byte header itself; RIFF and `data` sizes are back-patched before
 the POST, since neither is known until release.
 
@@ -223,7 +223,7 @@ hangs indefinitely.
 2. Capture starts; status item and overlay show recording.
 3. Release. Tap drains; WAV finalised in memory. **Snapshot the frontmost application.**
 4. No frames, or an all-silent buffer: report the capture-side cause and stop. Do not POST.
-5. POST with `X-Hark-Key` and `Content-Type: audio/wav`.
+5. POST with `X-Tacet-Key` and `Content-Type: audio/wav`.
 6. `200` with empty text: transient "heard nothing", paste nothing. Not an error.
 7. `200` with text: sanitise, verify the paste target, set the pasteboard, verify the write,
    then ⌘V.
@@ -279,7 +279,7 @@ sequences, U+2028/U+2029, and an oversized body.
 
 The two-machine default is plaintext HTTP (`install-client.sh:525`) to what
 `README.md:234` calls "a LAN address you trust". On that path an attacker reads the audio,
-the transcript and `X-Hark-Key`, and can forge the response the client then types.
+the transcript and `X-Tacet-Key`, and can forge the response the client then types.
 
 Revision 2 prohibited non-loopback HTTP while promising a Tailscale opt-in, with no
 mechanism. Resolved:
@@ -296,7 +296,7 @@ mechanism. Resolved:
   literal** only if that exact address is listed in `insecure_transport_hosts`.
 - The allowlist exists because Tailscale already encrypts at the network layer, so HTTP to
   a tailnet IP is a defensible choice — but it must be a stated one, not a silent default.
-  Provisioning TLS on the hark server would be a larger change than this issue.
+  Provisioning TLS on the tacet server would be a larger change than this issue.
 - A Tailscale MagicDNS name is therefore **not** usable over HTTP. Use the tailnet IP.
 - `--doctor` reports every entry as a warning naming the assumption it encodes.
 - Userinfo (`user@host`) rejected; `install-client.sh:241` already treats it as a defect.
@@ -317,10 +317,10 @@ both supported macOS versions, since bare IP handling has changed across release
 
 ## Configuration
 
-The key always lives at `~/.config/hark/key`, mode 600. Revision 1's inline-versus-file
+The key always lives at `~/.config/tacet/key`, mode 600. Revision 1's inline-versus-file
 branch is deleted: one path, one permission contract.
 
-- `install-client.sh` creates `~/.config/hark` mode 700 before writing. On a two-machine
+- `install-client.sh` creates `~/.config/tacet` mode 700 before writing. On a two-machine
   *client* the directory does not otherwise exist — the server-side `mkdir` ran on the
   other machine.
 - The key is read and **trimmed**: `config.py:129` writes `key + "\n"` and
@@ -342,11 +342,11 @@ design.
 
 | Condition | Message names |
 |---|---|
-| Connection / transport failure | The URL, and that hark may not be running |
+| Connection / transport failure | The URL, and that tacet may not be running |
 | 401 | Key mismatch, and the file to fix |
 | 415 | A client bug, not a microphone problem |
 | 400 | Malformed or unsupported audio — a client format bug. Shows the server's `detail` |
-| 503 | whisper-server down, `/tmp/hark-whisper.err` |
+| 503 | whisper-server down, `/tmp/tacet-whisper.err` |
 | Other | Status code and the server's `detail` |
 | No frames captured | Device selection, and microphone permission |
 | All-silent buffer | Input level or a muted device — **not** reported as a denied grant |
@@ -414,7 +414,7 @@ agent is reflected rather than cached from launch.
 "Downloads the artifact" is not a design. The installer replaces code that holds TCC grants,
 so:
 
-- **Artifact**: a universal (arm64 + x86_64) `Hark.app`, zipped, attached to a GitHub
+- **Artifact**: a universal (arm64 + x86_64) `Tacet.app`, zipped, attached to a GitHub
   release, with the tag as the version. `install-client.sh` selects the newest release
   unless pinned.
 - **Verification splits across CI and the client**, because they have different tools
@@ -461,7 +461,7 @@ delivery, real paste into a real window.
 
 ## Migration
 
-**Nothing outside hark's own files is deleted.** But "report and move on" is insufficient:
+**Nothing outside tacet's own files is deleted.** But "report and move on" is insufficient:
 
 - A running Hammerspoon holds the old Lua **in memory**. Replacing the symlinked file
   changes nothing until it reloads, so both clients bind ⌃⌥Space.
@@ -478,8 +478,8 @@ hotkey the old client still holds is not possible, so registration is split out 
 health check and happens after the handover:
 
 0. **Preserve a rollback target first.** Copy the *current, working* `client/init.lua` to
-   `~/.config/hark/legacy-client.lua` and record ownership in
-   `~/.config/hark/legacy-client.json`: that hark installed the symlink, its original
+   `~/.config/tacet/legacy-client.lua` and record ownership in
+   `~/.config/tacet/legacy-client.json`: that tacet installed the symlink, its original
    target path, and a checksum.
 
    Both files are load-bearing and revision 4 had neither. `client/init.lua` becomes a
@@ -489,11 +489,11 @@ health check and happens after the handover:
 
    The ownership record exists because content-matching the symlink target cannot survive
    the repo moving: an absolute symlink (`install-client.sh:595`) to a moved checkout is
-   dangling, so there is no content left to match. A durable record in `~/.config/hark`
-   answers "did hark install this" without depending on the target existing.
-1. **Detect a hark-era install**, in this order: the ownership record from step 0 if
-   present; otherwise a symlink whose target carries the hark marker comment; otherwise a
-   *dangling* symlink whose recorded path matches a known hark layout. A real file, or a
+   dangling, so there is no content left to match. A durable record in `~/.config/tacet`
+   answers "did tacet install this" without depending on the target existing.
+1. **Detect a tacet-era install**, in this order: the ownership record from step 0 if
+   present; otherwise a symlink whose target carries the tacet marker comment; otherwise a
+   *dangling* symlink whose recorded path matches a known tacet layout. A real file, or a
    symlink to something without the marker and without a record, means the user runs
    Hammerspoon independently — do not quit it, do not offer to revoke anything, and ask
    before proceeding.
@@ -508,20 +508,20 @@ health check and happens after the handover:
    call `SMAppService.mainApp.register()`.
 5. **On failure at step 4, roll back in this order**: stop the agent, ensure
    `SMAppService.mainApp` is **not** registered (unregister if step 4 got that far), point
-   `~/.hammerspoon/init.lua` at `~/.config/hark/legacy-client.lua`, relaunch Hammerspoon,
+   `~/.hammerspoon/init.lua` at `~/.config/tacet/legacy-client.lua`, relaunch Hammerspoon,
    confirm it is running, then report. The user ends with a working client either way.
 
    Deregistration is the part revision 4 missed: it left the agent "installed but inactive"
    while registration ran unconditionally at first launch, so the agent would start at the
    next login and fight the Hammerspoon that had just been restored. Registration is
    therefore deliberately the *last* step of a successful cutover, not part of launch.
-6. **Only on success**, remove the symlink hark created, and offer to revoke **all three**
+6. **Only on success**, remove the symlink tacet created, and offer to revoke **all three**
    grants — `tccutil reset Accessibility`, `Microphone`, and `ListenEvent`, for
    `org.hammerspoon.Hammerspoon`. Input Monitoring is included because `README.md:266-268`
    told Fn-key users to grant it.
 7. If the user declines revocation, say plainly that the original exposure remains. The
    install proceeds; it is not silently reported as closed.
-8. `~/.config/hark/legacy-client.lua` is kept, not deleted, so a later manual rollback is
+8. `~/.config/tacet/legacy-client.lua` is kept, not deleted, so a later manual rollback is
    still possible. It is inert once the symlink is gone.
 
 Removing `client/rec.swift` while `install-client.sh:426` still compiles it would brick the
@@ -537,15 +537,15 @@ Line numbers are against `8d12f7b`. In scope for the implementation, not follow-
   the launch block (`:613`), and every `--doctor` check: `check_hammerspoon_installed`
   (`:86`), the Lua-config key grep (`:127`), the recorder check (`:173`), the mic-status
   read (`:196`), the Hammerspoon TCC query (`:679`), and the probe wait (`:742`).
-- **`src/hark/app.py`** (`:103-107`) and **`tests/test_app.py`** (`:107`) — branch the 400
+- **`src/tacet/app.py`** (`:103-107`) and **`tests/test_app.py`** (`:107`) — branch the 400
   detail by cause.
-- **`src/hark/audio.py`** and **`tests/test_audio.py`** — enforce and assert channel count
+- **`src/tacet/audio.py`** and **`tests/test_audio.py`** — enforce and assert channel count
   and sample rate, not just sample width (`:45`).
 - **`README.md`** — architecture (`:16`), install step 1 (`:138`), the `--doctor` list
   (`:175`), "Changing the hotkey" (`:250`), two-machine setup, repo layout (`:387`).
 - **Retire** `client/rec.swift`, `tests/test_client_record.lua`, and
-  `client/hark-config.example.lua`, replaced by a `client.json` example.
-- **`docs/superpowers/specs/2026-07-14-hark-open-source-design.md:7`** — "(architecture
+  `client/tacet-config.example.lua`, replaced by a `client.json` example.
+- **`docs/superpowers/specs/2026-07-14-tacet-open-source-design.md:7`** — "(architecture
   unchanged)", which this design invalidates.
 - Update the status line of `2026-07-14-dictate-design.md` (`:10`), still "Design approved,
   pending implementation plan".
@@ -562,7 +562,7 @@ non-goals this design contradicts — "CI, release automation, versioning, chang
 - Pre-warming the audio engine. In-process capture makes it possible; the README's privacy
   trade-off is deliberate and stands.
 - Streaming transcription and auto-submit, per the 2026-07-14 spec.
-- TLS on the hark server. The `insecure_transport_hosts` allowlist is the interim answer.
+- TLS on the tacet server. The `insecure_transport_hosts` allowlist is the interim answer.
 - Keychain-pinned server origin. Follow-up, recorded above.
 
 ## Clipboard retention
@@ -571,7 +571,7 @@ Two reviewers asked for this to be decided rather than left open, and they are r
 a privacy policy, not a preference.
 
 **The transcript self-clears after 90 seconds, but only if `NSPasteboard.changeCount` is
-unchanged since hark wrote it.**
+unchanged since tacet wrote it.**
 
 The existing behaviour — set and never restore — is deliberate and stays: a misfired paste
 stays recoverable with a manual ⌘V instead of re-speaking. See the comment above
@@ -581,8 +581,8 @@ without holding a single TCC grant. That is a real exposure the design was silen
 inheriting.
 
 90 seconds keeps the recovery window that motivated the original decision while bounding
-the exposure. The `changeCount` guard means hark only ever clears its own value — if you
-copied something else in the meantime, hark does nothing.
+the exposure. The `changeCount` guard means tacet only ever clears its own value — if you
+copied something else in the meantime, tacet does nothing.
 
 The README should state this as a privacy property, not only as paste-recovery ergonomics.
 

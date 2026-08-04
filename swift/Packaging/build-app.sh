@@ -1,17 +1,17 @@
 #!/bin/bash
-# build-app.sh — build the release binary and assemble a signed Hark.app bundle.
+# build-app.sh — build the release binary and assemble a signed Tacet.app bundle.
 #
 #   ./Packaging/build-app.sh
 #
-# Signing identity comes from $HARK_SIGN_IDENTITY if set (e.g. a Developer ID),
+# Signing identity comes from $TACET_SIGN_IDENTITY if set (e.g. a Developer ID),
 # otherwise ad-hoc ("-") is used. Default is ad-hoc — fine for local dev.
 set -euo pipefail
 
 PKG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${PKG_DIR}/.." && pwd)"
-APP="${PKG_DIR}/Hark.app"
+APP="${PKG_DIR}/Tacet.app"
 
-SIGN_IDENTITY="${HARK_SIGN_IDENTITY:-}"
+SIGN_IDENTITY="${TACET_SIGN_IDENTITY:-}"
 
 echo "==> Building release binary"
 cd "${ROOT_DIR}"
@@ -21,10 +21,10 @@ echo "==> Assembling ${APP}"
 rm -rf "${APP}"
 mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 
-cp ".build/release/hark" "${APP}/Contents/MacOS/hark"
+cp ".build/release/tacet" "${APP}/Contents/MacOS/tacet"
 cp "${PKG_DIR}/Info.plist" "${APP}/Contents/Info.plist"
 cp "${PKG_DIR}/entitlements.plist" "${APP}/Contents/Resources/"
-chmod +x "${APP}/Contents/MacOS/hark"
+chmod +x "${APP}/Contents/MacOS/tacet"
 
 echo "==> Signing"
 if [[ -n "${SIGN_IDENTITY}" ]]; then

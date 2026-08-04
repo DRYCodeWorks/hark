@@ -20,10 +20,10 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "install-client.sh"
 INFO_PLIST = REPO / "swift" / "Packaging" / "Info.plist"
-AGENT_SWIFT = REPO / "swift" / "Sources" / "hark" / "AgentController.swift"
+AGENT_SWIFT = REPO / "swift" / "Sources" / "tacet" / "AgentController.swift"
 BUILD_SCRIPT = REPO / "swift" / "Packaging" / "build-app.sh"
 
-BUNDLE_ID = "com.drycodeworks.hark-agent"
+BUNDLE_ID = "com.drycodeworks.tacet-agent"
 
 # doctor_pass/doctor_fail colour their markers unconditionally.
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -86,7 +86,7 @@ class TestClientConfig:
             {"HOME": str(tmp_path)},
         )
         assert rc == 0, out
-        written = json.loads((tmp_path / ".config/hark/client.json").read_text())
+        written = json.loads((tmp_path / ".config/tacet/client.json").read_text())
         assert written["server"] == "http://10.1.2.3:8911/dictate"
         assert written["key"] == "s3cr3t"
 
@@ -96,7 +96,7 @@ class TestClientConfig:
             'write_client_config "http://127.0.0.1:8911/dictate" "k"', {"HOME": str(tmp_path)}
         )
         assert rc == 0, out
-        mode = (tmp_path / ".config/hark/client.json").stat().st_mode & 0o777
+        mode = (tmp_path / ".config/tacet/client.json").stat().st_mode & 0o777
         assert mode == 0o600
 
     def test_a_key_containing_quotes_does_not_produce_broken_json(self, tmp_path):
@@ -110,7 +110,7 @@ class TestClientConfig:
             {"HOME": str(tmp_path)},
         )
         assert rc == 0, out
-        written = json.loads((tmp_path / ".config/hark/client.json").read_text())
+        written = json.loads((tmp_path / ".config/tacet/client.json").read_text())
         assert written["key"] == r'a"b\c'
 
     def test_json_field_round_trips_what_write_client_config_wrote(self, tmp_path):
@@ -128,7 +128,7 @@ class TestLegacyMigration:
     def _legacy(self, home: Path, server: str, key: str) -> None:
         d = home / ".hammerspoon"
         d.mkdir(parents=True)
-        (d / "hark-config.lua").write_text(
+        (d / "tacet-config.lua").write_text(
             f'return {{\n  server = "{server}",\n  key = "{key}",\n}}\n'
         )
 
@@ -142,7 +142,7 @@ class TestLegacyMigration:
     def test_migration_never_modifies_the_hammerspoon_config(self, tmp_path):
         # Rolling back must stay as cheap as relaunching Hammerspoon.
         self._legacy(tmp_path, "http://10.0.0.1:8911/dictate", "oldkey")
-        legacy = tmp_path / ".hammerspoon" / "hark-config.lua"
+        legacy = tmp_path / ".hammerspoon" / "tacet-config.lua"
         before = legacy.read_bytes()
         rc, out = run_sourced("resolve_config", {"HOME": str(tmp_path)})
         assert rc == 0, out
@@ -158,13 +158,13 @@ class TestLegacyMigration:
         assert rc == 0
         rc, out = run_sourced("resolve_config", {"HOME": str(tmp_path)})
         assert rc == 0, out
-        written = json.loads((tmp_path / ".config/hark/client.json").read_text())
+        written = json.loads((tmp_path / ".config/tacet/client.json").read_text())
         assert written["key"] == "newkey", "a re-run clobbered a hand-edited config"
 
     def test_falls_back_to_the_local_server_key(self, tmp_path):
         import json
 
-        d = tmp_path / ".config/hark"
+        d = tmp_path / ".config/tacet"
         d.mkdir(parents=True)
         (d / "key").write_text("localkey\n")
         rc, out = run_sourced("resolve_config", {"HOME": str(tmp_path)})
@@ -177,7 +177,7 @@ class TestLegacyMigration:
         rc, out = run_sourced("resolve_config", {"HOME": str(tmp_path)})
         assert rc != 0
         assert "no shared secret" in out
-        assert not (tmp_path / ".config/hark/client.json").exists()
+        assert not (tmp_path / ".config/tacet/client.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +198,7 @@ class TestHammerspoonIsGone:
 
     def test_the_lua_client_is_deleted(self):
         assert not (REPO / "client" / "init.lua").exists()
-        assert not (REPO / "client" / "hark-config.example.lua").exists()
+        assert not (REPO / "client" / "tacet-config.example.lua").exists()
         assert not (REPO / "tests" / "test_client_record.lua").exists()
 
     def test_ci_no_longer_installs_lua(self):
@@ -213,7 +213,7 @@ class TestHammerspoonIsGone:
     def test_the_installer_still_migrates_an_existing_lua_config(self):
         # Deleting the client must not strand anyone mid-upgrade: the old
         # config is still the only place their key lives.
-        assert "hark-config.lua" in SCRIPT.read_text()
+        assert "tacet-config.lua" in SCRIPT.read_text()
 
 
 class TestSshKeyFetch:
@@ -250,7 +250,7 @@ class TestSshKeyFetch:
         rc, out = run_sourced("resolve_config </dev/null", {"HOME": str(tmp_path)})
         assert rc != 0
         assert "no shared secret" in out
-        assert not (tmp_path / ".config/hark/client.json").exists()
+        assert not (tmp_path / ".config/tacet/client.json").exists()
 
 
 class TestHealthDoctor:
@@ -305,7 +305,7 @@ class TestStaleGrantReset:
         )
         assert rc == 0, out
         assert "binary changed" not in out
-        assert (tmp_path / ".config/hark/.agent-cdhash").read_text() == "aaaa1111"
+        assert (tmp_path / ".config/tacet/.agent-cdhash").read_text() == "aaaa1111"
 
     def test_reinstalling_the_same_binary_does_not_reset(self, tmp_path):
         # Re-running the installer on an unchanged build must not cost the
@@ -324,7 +324,7 @@ class TestStaleGrantReset:
         rc, out = run_sourced("reset_stale_grants_on_identity_change", env_b)
         assert rc == 0, out
         assert "binary changed" in out
-        assert (tmp_path / ".config/hark/.agent-cdhash").read_text() == "bbbb2222"
+        assert (tmp_path / ".config/tacet/.agent-cdhash").read_text() == "bbbb2222"
 
     def test_only_accessibility_is_reset(self):
         # The microphone path already tells the truth: the agent's probe runs
@@ -390,14 +390,14 @@ class TestTransportPolicy:
         rc, out = self._write(tmp_path, "http://dans-mac-studio:8911/dictate")
         assert rc != 0
         assert "hostname" in out
-        assert not (tmp_path / ".config/hark/client.json").exists()
+        assert not (tmp_path / ".config/tacet/client.json").exists()
 
     def test_a_numeric_ip_is_allowed_and_records_the_choice(self, tmp_path):
         import json
 
         rc, out = self._write(tmp_path, "http://100.64.66.46:8911/dictate")
         assert rc == 0, out
-        written = json.loads((tmp_path / ".config/hark/client.json").read_text())
+        written = json.loads((tmp_path / ".config/tacet/client.json").read_text())
         assert written["allowPlaintext"] is True
         assert "allowPlaintext" in out, "the choice should be stated, not silent"
         # The warning must not overclaim: on a tailnet WireGuard already
@@ -409,7 +409,7 @@ class TestTransportPolicy:
 
         rc, out = self._write(tmp_path, "http://127.0.0.1:8911/dictate")
         assert rc == 0, out
-        written = json.loads((tmp_path / ".config/hark/client.json").read_text())
+        written = json.loads((tmp_path / ".config/tacet/client.json").read_text())
         assert written["allowPlaintext"] is False
 
     def test_https_to_a_hostname_is_fine(self, tmp_path):
@@ -417,7 +417,7 @@ class TestTransportPolicy:
 
         rc, out = self._write(tmp_path, "https://dans-mac-studio:8911/dictate")
         assert rc == 0, out
-        written = json.loads((tmp_path / ".config/hark/client.json").read_text())
+        written = json.loads((tmp_path / ".config/tacet/client.json").read_text())
         assert written["allowPlaintext"] is False
 
 
@@ -436,7 +436,7 @@ class TestStatusDoctor:
              "microphone": "authorized", "accessibility": "trusted",
              "hotkey": "registered"}
         d.update(fields)
-        p = home / ".config/hark"
+        p = home / ".config/tacet"
         p.mkdir(parents=True, exist_ok=True)
         (p / "status.json").write_text(json.dumps(d))
 
@@ -521,6 +521,6 @@ class TestAppTransportSecurity:
     def test_the_app_still_gates_transport_itself(self):
         # The exception is only defensible because ClientConfig refuses what
         # ATS would have allowed — notably a hostname over plain HTTP.
-        cc = (REPO / "swift" / "Sources" / "HarkCore" / "ClientConfig.swift").read_text()
+        cc = (REPO / "swift" / "Sources" / "TacetCore" / "ClientConfig.swift").read_text()
         assert "validateTransport" in cc
         assert "allowPlaintext" in cc
