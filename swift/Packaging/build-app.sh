@@ -29,8 +29,13 @@ chmod +x "${APP}/Contents/MacOS/tacet"
 echo "==> Signing"
 if [[ -n "${SIGN_IDENTITY}" ]]; then
     echo "   using identity: ${SIGN_IDENTITY}"
+    # --timestamp is REQUIRED for notarization and is not the default. Without
+    # it Apple rejects the submission with "The signature does not include a
+    # secure timestamp" — after the upload, so the failure costs a round trip.
+    # It contacts Apple's timestamp server, so this step needs network.
     codesign --force --deep --sign "${SIGN_IDENTITY}" \
         --options runtime \
+        --timestamp \
         --entitlements "${PKG_DIR}/entitlements.plist" \
         "${APP}"
 else
