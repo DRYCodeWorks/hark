@@ -360,15 +360,86 @@ PLIST
   log "Rendered both plists (tacet: ${BIND}:${PORT}, whisper: 127.0.0.1:${WHISPER_PORT})"
 }
 
+# Run a command with a wall-clock bound, printing its output and returning its
+# status — or 124 if it had to be killed. Defined ABOVE the source guard so the
+# tests can exercise it directly; the same mistake with render_plists made every
+# test report "command not found".
+#
+# Prefers a real timeout(1) when one is installed (coreutils), otherwise falls
+# back to background-and-poll. The fallback is the point: a stock macOS has
+# neither timeout(1) nor gtimeout, so depending on coreutils would leave this
+# silently unbounded on exactly the machines it protects.
+run_bounded() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+    return $?
+  fi
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+    return $?
+  fi
+  local out_file pid waited=0 rc
+  out_file="$(mktemp)"
+  "$@" >"$out_file" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( waited >= secs )); then
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      rm -f "$out_file"
+      return 124
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid"
+  rc=$?
+  cat "$out_file"
+  rm -f "$out_file"
+  return $rc
+}
+
 # line only runs when the script is executed directly.
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
 fi
 
-if [[ "${1:-}" == "--doctor" ]]; then
-  run_doctor
-  exit $?
-fi
+usage() {
+  cat <<'EOS'
+tacet — server setup.
+
+Run this on the Mac that transcribes. It installs Tacet.app, downloads the
+whisper model, renders both launchd plists from ~/.config/tacet/config.toml,
+and loads the services.
+
+  ./install-server.sh              install or update
+  ./install-server.sh --doctor     read-only diagnosis, changes nothing
+  ./install-server.sh --help       this message
+
+Environment:
+  TACET_APP_DIR     install the bundle here instead of ~/Applications
+  TACET_ALLOW_ADHOC build without a Developer ID (local dev only)
+
+Safe to re-run: every step checks current state first.
+EOS
+}
+
+# Argument handling is explicit, and an unknown flag is an ERROR rather than
+# something to ignore. Falling through to "install" meant `--help` performed a
+# real installation — it rebuilt the bundle, and on a machine that could sign
+# it would have replaced a working one. A typo should not install anything.
+case "${1:-}" in
+  --doctor)  run_doctor; exit $? ;;
+  -h|--help) usage; exit 0 ;;
+  "")        ;;  # no arguments: install
+  *)
+    err "unknown option: $1"
+    echo >&2
+    usage >&2
+    exit 2
+    ;;
+esac
 
 # ==============================================================================
 # Install
@@ -454,10 +525,33 @@ fi
 # Captured, not piped: `tacet` with no arguments prints usage and exits 2 —
 # correct behaviour — and under `set -o pipefail` that makes the pipeline fail
 # no matter what grep says, so the check condemned a working binary.
-usage_out="$("$APP_DST/Contents/MacOS/tacet" 2>&1 || true)"
+#
+# BOUNDED, because "does not run" and "does not finish" are different failures
+# and only one of them used to be handled. A bundle can block in dyld before
+# reaching main — Gatekeeper assessment on a bundle in /Applications does
+# exactly this (issue #25) — and an unbounded check then hangs the installer
+# forever with no output, no error, and no service. A verification step that
+# can wedge is worse than no verification step.
+# run_bounded is defined above the source guard so the tests can reach it.
+
+# `tacet` with no arguments exits 2 by design, so a non-zero status here is
+# expected and only the OUTPUT decides. 124 is the one status that means
+# something different: the timeout fired and nothing can be concluded.
+set +e
+usage_out="$(run_bounded 20 "$APP_DST/Contents/MacOS/tacet" 2>&1)"
+verify_rc=$?
+set -e
+
+if [[ "$verify_rc" -eq 124 ]]; then
+  err "installed ${APP_DST} but it did not finish starting within 20s."
+  err "The process blocks before reaching main — nothing it logs will say so."
+  err "A bundle in /Applications does this under Gatekeeper assessment (#25);"
+  err "installing to ~/Applications (no cask, no TACET_APP_DIR) is known-good."
+  exit 1
+fi
 if [[ "$usage_out" != *"usage: tacet"* ]]; then
   err "installed ${APP_DST} but the binary does not run — aborting."
-  err "got: ${usage_out}"
+  err "got: ${usage_out:-<no output>}"
   exit 1
 fi
 log "Installed."
