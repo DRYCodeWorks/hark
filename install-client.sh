@@ -42,7 +42,27 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_SRC="$REPO_DIR/swift/Packaging/Tacet.app"
-APP_DIR="$HOME/Applications"
+
+# Resolution order, most specific first:
+#   1. $TACET_APP_DIR          — explicit, always wins
+#   2. a Homebrew cask install — Homebrew owns that bundle; we point the agent
+#                                at it and never rebuild, overwrite, or remove it
+#   3. ~/Applications          — built from this clone, the from-source default
+#
+# Rebuilding over a brew-managed bundle would re-sign it (ad-hoc, with no
+# identity in the environment), which invalidates the Accessibility and
+# Microphone grants keyed to its designated requirement — the exact failure
+# this installer works hardest to avoid — and leaves `brew uninstall` looking
+# at something it did not install.
+APP_MANAGED=0
+if [[ -n "${TACET_APP_DIR:-}" ]]; then
+  APP_DIR="$TACET_APP_DIR"
+elif caskroom="$(brew --caskroom 2>/dev/null)" && [[ -n "$caskroom" && -d "$caskroom/tacet" ]]; then
+  APP_DIR="/Applications"
+  APP_MANAGED=1
+else
+  APP_DIR="$HOME/Applications"
+fi
 APP_DST="$APP_DIR/Tacet.app"
 
 TACET_CONFIG_DIR="$HOME/.config/tacet"
@@ -612,8 +632,16 @@ run_uninstall() {
     log "unloaded $AGENT_LABEL"
   fi
   rm -f "$AGENT_PLIST"
-  rm -rf "$APP_DST"
-  log "removed $APP_DST and $AGENT_PLIST"
+  if [[ "$APP_MANAGED" -eq 1 ]]; then
+    # Deleting a brew-managed bundle leaves Homebrew believing tacet is still
+    # installed, so `brew uninstall` then fails and `brew reinstall` is the
+    # only way back. Removing what we installed means the plist only.
+    log "removed $AGENT_PLIST"
+    log "left $APP_DST alone — Homebrew owns it: brew uninstall --cask tacet"
+  else
+    rm -rf "$APP_DST"
+    log "removed $APP_DST and $AGENT_PLIST"
+  fi
   # client.json is deliberately left in place: it holds the shared secret and
   # is what a reinstall (or the Hammerspoon client) would want back.
   log "left $CLIENT_CONFIG alone — delete it by hand if you meant to."
@@ -663,16 +691,25 @@ case "$MODE" in
   uninstall) run_uninstall; exit 0 ;;
 esac
 
-log "building the agent"
-(cd "$REPO_DIR/swift" && swift build -c release && bash Packaging/build-app.sh)
+if [[ "$APP_MANAGED" -eq 1 ]]; then
+  # Homebrew already installed the bundle — see the note at APP_DIR.
+  log "using the Homebrew-installed bundle at $APP_DST (not rebuilding)"
+  if [[ ! -x "$APP_DST/Contents/MacOS/tacet" ]]; then
+    err "$APP_DST is missing its binary. Reinstall it: brew reinstall --cask tacet"
+    exit 1
+  fi
+else
+  log "building the agent"
+  (cd "$REPO_DIR/swift" && swift build -c release && bash Packaging/build-app.sh)
 
-log "installing to $APP_DST"
-mkdir -p "$APP_DIR"
-# Replaced wholesale rather than copied over: a stale file left inside the
-# bundle invalidates the signature, and the failure surfaces much later as an
-# unexplained TCC re-prompt.
-rm -rf "$APP_DST"
-cp -R "$APP_SRC" "$APP_DST"
+  log "installing to $APP_DST"
+  mkdir -p "$APP_DIR"
+  # Replaced wholesale rather than copied over: a stale file left inside the
+  # bundle invalidates the signature, and the failure surfaces much later as an
+  # unexplained TCC re-prompt.
+  rm -rf "$APP_DST"
+  cp -R "$APP_SRC" "$APP_DST"
+fi
 
 # Must run AFTER the copy (it hashes the installed bundle) and BEFORE the agent
 # restarts, so the agent's prompt lands on a cleared entry rather than a stale

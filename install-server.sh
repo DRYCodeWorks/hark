@@ -34,7 +34,27 @@ LABELS=(com.drycodeworks.tacet com.drycodeworks.tacet-whisper)
 # Where the running service lives. The clone is
 # a place to edit code; a daemon that runs out of it breaks when the checkout
 # moves and silently changes behaviour on `git pull`.
-APP_DIR="$HOME/Applications"
+#
+# Resolution order, most specific first:
+#   1. $TACET_APP_DIR          — explicit, always wins
+#   2. a Homebrew cask install — Homebrew owns that bundle; we point launchd
+#                                at it and never rebuild or overwrite it
+#   3. ~/Applications          — built from this clone, the from-source default
+#
+# The cask case is not a convenience. Rebuilding over a brew-managed bundle
+# would re-sign it (ad-hoc, without a signing identity in the environment),
+# which silently invalidates the TCC grants keyed to its designated
+# requirement and leaves `brew uninstall` looking at something it did not
+# install. Detect it and leave it alone.
+APP_MANAGED=0
+if [[ -n "${TACET_APP_DIR:-}" ]]; then
+  APP_DIR="$TACET_APP_DIR"
+elif caskroom="$(brew --caskroom 2>/dev/null)" && [[ -n "$caskroom" && -d "$caskroom/tacet" ]]; then
+  APP_DIR="/Applications"
+  APP_MANAGED=1
+else
+  APP_DIR="$HOME/Applications"
+fi
 APP_DST="$APP_DIR/Tacet.app"
 
 # Minimal TOML reader for the three scalars the plists need. Deliberately not a
@@ -404,20 +424,30 @@ fi
 # One signed bundle, two roles: `tacet serve` here, `tacet agent` on whatever Mac
 # you dictate from. install-client.sh installs the same artifact, so a
 # single-machine setup ends up with one copy that plays both parts.
-if ! command -v swift >/dev/null 2>&1; then
-  err "swift not found. Install the Xcode command line tools: xcode-select --install"
-  exit 1
+if [[ "$APP_MANAGED" -eq 1 ]]; then
+  # Homebrew already installed the bundle. Building here would overwrite a
+  # notarized bundle with a locally signed one — see the note at APP_DIR.
+  log "Using the Homebrew-installed bundle at ${APP_DST} (not rebuilding)."
+  if [[ ! -x "$APP_DST/Contents/MacOS/tacet" ]]; then
+    err "${APP_DST} is missing its binary. Reinstall it: brew reinstall --cask tacet"
+    exit 1
+  fi
+else
+  if ! command -v swift >/dev/null 2>&1; then
+    err "swift not found. Install the Xcode command line tools: xcode-select --install"
+    exit 1
+  fi
+
+  log "Building the server..."
+  (cd "$REPO_DIR/swift" && swift build -c release >/dev/null && bash Packaging/build-app.sh >/dev/null)
+
+  log "Installing to ${APP_DST}..."
+  mkdir -p "$APP_DIR"
+  # Replaced wholesale: a stale file left inside the bundle invalidates the
+  # signature, and that surfaces much later as an unexplained TCC re-prompt.
+  rm -rf "$APP_DST"
+  cp -R "$REPO_DIR/swift/Packaging/Tacet.app" "$APP_DST"
 fi
-
-log "Building the server..."
-(cd "$REPO_DIR/swift" && swift build -c release >/dev/null && bash Packaging/build-app.sh >/dev/null)
-
-log "Installing to ${APP_DST}..."
-mkdir -p "$APP_DIR"
-# Replaced wholesale: a stale file left inside the bundle invalidates the
-# signature, and that surfaces much later as an unexplained TCC re-prompt.
-rm -rf "$APP_DST"
-cp -R "$REPO_DIR/swift/Packaging/Tacet.app" "$APP_DST"
 
 # Prove it runs before a plist points launchd at it. A binary that cannot
 # start would otherwise surface as a restart loop with nothing in the log.
