@@ -328,6 +328,20 @@ reset_stale_grants_on_identity_change() {
   # First install, or the same binary reinstalled: nothing to invalidate.
   [[ -n "$old_hash" && "$old_hash" != "$new_hash" ]] || return 0
 
+  # A changed cdhash only invalidates the grant when the DESIGNATED REQUIREMENT
+  # is the cdhash — which is the ad-hoc case. A Developer ID signature's
+  # requirement is identifier + Team ID, so it is stable across rebuilds and the
+  # grant survives one. Resetting anyway makes the user re-grant Accessibility
+  # after every single install, which is precisely the cost that signing
+  # properly is supposed to remove.
+  local sig_info
+  sig_info="$(codesign -dvvv "$APP_DST" 2>&1 || true)"
+  if ! grep -q '^Signature=adhoc' <<<"$sig_info"; then
+    log "the agent binary changed, but it is signed with a Developer ID —"
+    log "its designated requirement is stable, so the grants carry over."
+    return 0
+  fi
+
   warn "the agent binary changed (${old_hash:0:12}… -> ${new_hash:0:12}…)."
   warn "Ad-hoc signing ties TCC grants to that hash, so the Accessibility grant"
   warn "no longer applies — and macOS would still show its toggle switched ON."

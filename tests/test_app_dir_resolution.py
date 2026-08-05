@@ -109,3 +109,31 @@ class TestManagedBundleIsLeftAlone:
         guard = uninstall.index('"$APP_MANAGED" -eq 1')
         removal = uninstall.index('rm -rf "$APP_DST"')
         assert guard < removal, "the removal must be guarded by the managed check"
+
+
+class TestGrantResetIsSignatureAware:
+    """A cdhash change only invalidates TCC when the cdhash IS the requirement.
+
+    That is the ad-hoc case. A Developer ID signature's designated requirement
+    is identifier + Team ID, stable across rebuilds, so the grant survives one.
+    Resetting regardless made the user re-grant Accessibility after every
+    install — exactly the cost that signing properly exists to remove, and it
+    was observed doing so on 2026-08-05 immediately after the switch to a
+    Developer ID build.
+    """
+
+    def test_the_reset_is_skipped_for_a_developer_id_signature(self):
+        code = CLIENT.read_text()
+        # Match the DEFINITION, not the earlier comment that names the
+        # function — indexing on the bare name lands in a comment and slices
+        # a completely different function's body.
+        fn = code[code.index("reset_stale_grants_on_identity_change() {"):]
+        fn = fn[:fn.index("\n}\n")]
+        adhoc_check = fn.index("Signature=adhoc")
+        reset_call = fn.index("tccutil reset Accessibility")
+        assert adhoc_check < reset_call, (
+            "the ad-hoc check must gate the reset, not follow it"
+        )
+        assert "return 0" in fn[adhoc_check:reset_call], (
+            "a non-ad-hoc signature must return before resetting anything"
+        )
