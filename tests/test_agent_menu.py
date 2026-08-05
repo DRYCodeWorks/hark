@@ -57,3 +57,54 @@ class TestMenuItemTargets:
         assert "#selector(quitAction)" in code
         assert re.search(r"@objc[^\n]*func quitAction", code), \
             "quitAction must be @objc for #selector to resolve at runtime"
+
+
+MAIN = (
+    Path(__file__).resolve().parent.parent
+    / "swift" / "Sources" / "tacet" / "main.swift"
+)
+
+
+class TestCLIContract:
+    """Launching the app with no arguments must run the agent.
+
+    Double-clicking a .app passes none, and after using Quit that is the only
+    way back a person would think to try. The original behaviour printed usage
+    and exit(2), which from Finder is completely invisible: no window, no icon,
+    no error, nothing written anywhere a user would look. "Reopen the app"
+    became "know it is a launchd agent and run launchctl kickstart".
+    """
+
+    def test_no_arguments_runs_the_agent(self):
+        code = MAIN.read_text()
+        assert 'case "agent", "":' in code, (
+            "the empty argument must share the agent branch"
+        )
+
+    def test_help_exits_zero_on_stdout_and_errors_do_not(self):
+        # A script distinguishes "you asked for help" from "you got it wrong"
+        # by stream and status. Conflating them makes --help look like failure.
+        code = MAIN.read_text()
+        help_branch = code[code.index('case "--help"'):code.index("default:")]
+        assert "standardOutput" in help_branch
+        assert "exit(0)" in help_branch
+        default_branch = code[code.index("default:"):]
+        assert "standardError" in default_branch
+        assert "exit(2)" in default_branch
+
+
+class TestInstallerDoesNotVerifyWithABareCall:
+    """The installer must verify with --help, not a bare invocation.
+
+    A bare call now starts a menu-bar agent that never exits, so the
+    verification step would burn its full timeout on every healthy install and
+    then declare the binary broken.
+    """
+
+    def test_the_verification_passes_help(self):
+        server = Path(__file__).resolve().parent.parent / "install-server.sh"
+        code = server.read_text()
+        assert 'run_bounded 20 "$APP_DST/Contents/MacOS/tacet" --help' in code
+        assert 'run_bounded 20 "$APP_DST/Contents/MacOS/tacet" 2>&1' not in code, (
+            "the bare form would launch the agent and hang"
+        )

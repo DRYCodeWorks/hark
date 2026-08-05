@@ -534,11 +534,12 @@ fi
 # can wedge is worse than no verification step.
 # run_bounded is defined above the source guard so the tests can reach it.
 
-# `tacet` with no arguments exits 2 by design, so a non-zero status here is
-# expected and only the OUTPUT decides. 124 is the one status that means
-# something different: the timeout fired and nothing can be concluded.
+# --help, NOT a bare invocation. `tacet` with no arguments now runs the agent
+# — that is what double-clicking the app has to do — so verifying with a bare
+# call would start a menu-bar agent and block until the timeout every single
+# install. --help is the only invocation guaranteed to print and exit.
 set +e
-usage_out="$(run_bounded 20 "$APP_DST/Contents/MacOS/tacet" 2>&1)"
+usage_out="$(run_bounded 20 "$APP_DST/Contents/MacOS/tacet" --help 2>&1)"
 verify_rc=$?
 set -e
 
