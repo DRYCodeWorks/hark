@@ -249,7 +249,14 @@ public final class AgentController: NSObject {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "tacet"
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitAction), keyEquivalent: "q"))
+        // target MUST be set. A menu item with a nil target sends its action up
+        // the responder chain, and AgentController is not in it — it is not the
+        // app delegate and owns no window. So nothing responds to quitAction,
+        // AppKit greys the item out during validation, and Quit does nothing at
+        // all. The failure is silent: the menu builds, the item appears.
+        let quit = NSMenuItem(title: "Quit", action: #selector(quitAction), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
         item.menu = menu
         statusItem = item
     }
