@@ -13,6 +13,7 @@ real `launchctl list`.
 import hashlib
 import re
 import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -267,6 +268,43 @@ class TestPlistRendering:
         cfg = '[server]\nbind = "127.0.0.1"\nport = 9111\n\n[whisper]\nport = 9110\n'
         _, plists = self._render(tmp_path, cfg)
         assert "9110" in plists["com.drycodeworks.tacet-whisper.plist"]
+
+    def test_the_vocab_prompt_reaches_whispers_plist(self, tmp_path):
+        # Vocabulary biasing is applied once, at whisper-server startup. A plist
+        # rendered without --prompt degrades every technical term in every
+        # transcript and reports nothing: the service starts, answers, and is
+        # simply worse. That is what happened between the launchd templates and
+        # this renderer, so it is asserted rather than assumed.
+        cfg = (self.ONE_MACHINE
+               + 'prompt = "Technical dictation. Vocabulary: ClickHouse, tmux."\n')
+        _, plists = self._render(tmp_path, cfg)
+        w = plists["com.drycodeworks.tacet-whisper.plist"]
+        assert "<string>--prompt</string>" in w
+        assert "ClickHouse" in w
+
+    def test_the_prompt_is_xml_escaped(self, tmp_path):
+        # The prompt is user text landing inside XML. An unescaped & or < makes
+        # the plist unparseable, which launchd answers with a restart loop.
+        cfg = self.ONE_MACHINE + 'prompt = "R&D <stack>"\n'
+        _, plists = self._render(tmp_path, cfg)
+        w = plists["com.drycodeworks.tacet-whisper.plist"]
+        assert "R&amp;D &lt;stack&gt;" in w
+        ET.fromstring(w)
+
+    def test_an_empty_prompt_omits_the_flag(self, tmp_path):
+        # An empty --prompt is not the same as no --prompt: whisper takes the
+        # empty string as the initial prompt.
+        _, plists = self._render(tmp_path, self.ONE_MACHINE)
+        assert "--prompt" not in plists["com.drycodeworks.tacet-whisper.plist"]
+
+    def test_non_speech_tokens_stay_suppressed(self, tmp_path):
+        # Without these, whisper emits "[BLANK_AUDIO]" and timestamp prefixes
+        # into text that gets pasted at the cursor. sanitize() does not strip
+        # either — it only collapses whitespace and control characters.
+        _, plists = self._render(tmp_path, self.ONE_MACHINE)
+        w = plists["com.drycodeworks.tacet-whisper.plist"]
+        assert "<string>--suppress-nst</string>" in w
+        assert "<string>--no-timestamps</string>" in w
 
     def test_whisper_stays_on_loopback(self, tmp_path):
         # whisper handles raw audio. It must never be reachable off-box, and

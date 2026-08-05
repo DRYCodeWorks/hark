@@ -261,7 +261,20 @@ render_plists() {
   PORT="$(config_value server port 8911)"
   WHISPER_PORT="$(config_value whisper port 8910)"
   WHISPER_BIN="$(command -v whisper-server || echo /opt/homebrew/bin/whisper-server)"
-  
+
+  # whisper.prompt seeds the decoder at server startup — it is the only place
+  # vocabulary biasing is applied (never per request), so a plist rendered
+  # without it silently degrades every technical term in every transcript and
+  # produces no error anywhere. The value is user text going into XML, so it
+  # is escaped rather than interpolated raw.
+  WHISPER_PROMPT="$(config_value whisper prompt "")"
+  PROMPT_ARGS=""
+  if [[ -n "$WHISPER_PROMPT" ]]; then
+    PROMPT_ESCAPED="$(printf '%s' "$WHISPER_PROMPT" \
+      | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
+    PROMPT_ARGS=$'\n\t\t<string>--prompt</string>\n\t\t<string>'"${PROMPT_ESCAPED}"'</string>'
+  fi
+
   cat > "$LAUNCH_AGENTS/com.drycodeworks.tacet.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -298,6 +311,8 @@ PLIST
 		<string>${WHISPER_PORT}</string>
 		<string>--language</string>
 		<string>en</string>
+		<string>--no-timestamps</string>
+		<string>--suppress-nst</string>${PROMPT_ARGS}
 	</array>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>
