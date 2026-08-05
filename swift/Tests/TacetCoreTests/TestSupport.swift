@@ -87,6 +87,29 @@ final class MiniHTTPServer {
         read()
     }
 
-    func start() { listener.start(queue: .global(qos: .userInitiated)) }
+    /// Start the listener and wait until it is actually accepting connections.
+    ///
+    /// `NWListener.start` is asynchronous — it returns while the listener is
+    /// still `.setup`/`.waiting`, so a test that connects immediately races it.
+    /// On an idle machine the connect wins and everything passes, which is why
+    /// this only ever appeared on CI: two different tests in DictateClientTests
+    /// failed on 2026-08-05, each reporting a transport error ("connection was
+    /// lost", "could not connect") instead of the response they asserted on.
+    /// A flaky test in a required check is worse than a missing one — it
+    /// teaches you to re-run rather than read.
+    func start() {
+        let ready = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { state in
+            // .failed also signals: waiting out the full timeout on a listener
+            // that will never be ready turns a clear error into a slow one.
+            switch state {
+            case .ready, .failed, .cancelled: ready.signal()
+            default: break
+            }
+        }
+        listener.start(queue: .global(qos: .userInitiated))
+        _ = ready.wait(timeout: .now() + 5)
+    }
+
     func stop() { listener.cancel() }
 }
