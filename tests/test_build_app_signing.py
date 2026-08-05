@@ -126,6 +126,49 @@ class TestSigningPolicy:
         assert "TACET_ALLOW_ADHOC" in r.stderr
 
 
+class TestSignatureTypeDetection:
+    """The ad-hoc check must not be piped into `grep -q`.
+
+    `codesign -dvvv ... | grep -q PATTERN` looks correct and is inverted under
+    `set -o pipefail`: grep exits at the first match, codesign takes SIGPIPE,
+    and the pipeline reports failure *because* the pattern matched. Written
+    that way, every one of these checks passes every ad-hoc bundle — silently,
+    and in exactly the case it was added to catch. It was written that way
+    first, and the ad-hoc bundle sailed through all three.
+
+    Checked at source level rather than against a real bundle so it also runs
+    on the Linux leg of CI, where there is no codesign at all.
+    """
+
+    SCRIPTS = [
+        SCRIPT,
+        SCRIPT.parent.parent.parent / "install-server.sh",
+        SCRIPT.parent.parent.parent / "install-client.sh",
+    ]
+
+    @pytest.mark.parametrize("path", SCRIPTS, ids=lambda p: p.name)
+    def test_codesign_output_is_captured_before_matching(self, path):
+        code = "\n".join(
+            line for line in path.read_text().splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        for line in code.splitlines():
+            if "codesign" in line and "|" in line and "grep -q" in line:
+                pytest.fail(
+                    f"{path.name}: codesign piped into `grep -q` inverts under "
+                    f"pipefail — capture first, then match:\n  {line.strip()}"
+                )
+
+    @pytest.mark.parametrize("path", SCRIPTS[1:], ids=lambda p: p.name)
+    def test_the_doctors_check_signature_type_not_just_validity(self, path):
+        # `codesign --verify --strict` is satisfied by an ad-hoc signature, so
+        # on its own it cannot tell a distributable bundle from one that loses
+        # its TCC grants on the next rebuild.
+        assert "Signature=adhoc" in path.read_text(), (
+            f"{path.name}'s doctor does not distinguish an ad-hoc signature"
+        )
+
+
 class TestBash32Compatibility:
     def test_the_script_runs_under_the_bash_macos_actually_ships(self):
         # The shebang is /bin/bash, which on macOS is 3.2.57 — no mapfile, no

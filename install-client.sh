@@ -416,13 +416,18 @@ check_signature() {
   # reported "valid (adhoc)" as a PASS — which is the state that silently
   # costs the Accessibility and Microphone grants on the next rebuild.
   # The type is the thing worth checking, not just that verification passed.
-  if codesign -dvvv "$APP_DST" 2>&1 | grep -q '^Signature=adhoc'; then
+  # Captured before matching rather than piped into `grep -q`: grep exits at
+  # the first match, codesign takes SIGPIPE, and pipefail turns the match into
+  # a failed pipeline — which would pass every ad-hoc bundle, exactly what
+  # this check exists to catch. Same trap as the launchctl listing.
+  local sig_info identity
+  sig_info="$(codesign -dvvv "$APP_DST" 2>&1 || true)"
+  if grep -q '^Signature=adhoc' <<<"$sig_info"; then
     doctor_fail "Tacet.app is signed with a Developer ID (found: ad-hoc)" \
       "rebuild with an identity: TACET_SIGN_IDENTITY=\"Developer ID Application: ...\" ./install-client.sh"
     return 1
   fi
-  local identity
-  identity="$(codesign -dvvv "$APP_DST" 2>&1 | sed -n 's/^Authority=//p' | head -1 || true)"
+  identity="$(sed -n 's/^Authority=//p' <<<"$sig_info" | head -1)"
   doctor_pass "Tacet.app signature is valid (${identity:-unknown})"
 }
 

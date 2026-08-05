@@ -61,6 +61,14 @@ jobs:
         run: cd swift && swift test
 
       - name: Build Tacet.app
+        # A runner has no Developer ID, and build-app.sh refuses to sign
+        # ad-hoc by default (#21) — so CI has to opt in explicitly. That is
+        # the intended shape: what CI checks here is that the bundle
+        # assembles and keeps its entitlements, not that it is
+        # distributable. A release build is signed on a machine that has
+        # the certificate.
+        env:
+          TACET_ALLOW_ADHOC: "1"
         run: cd swift && swift build -c release && bash Packaging/build-app.sh
 
       - name: Verify the signature

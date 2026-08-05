@@ -35,7 +35,16 @@ resolve_developer_id() {
 SIGN_IDENTITY="${TACET_SIGN_IDENTITY:-}"
 ALLOW_ADHOC="${TACET_ALLOW_ADHOC:-}"
 
-if [[ -z "${SIGN_IDENTITY}" ]]; then
+if [[ -n "${ALLOW_ADHOC}" && -z "${SIGN_IDENTITY}" ]]; then
+    # TACET_ALLOW_ADHOC=1 means "build me an ad-hoc bundle", not "fall back to
+    # one if you happen not to find a certificate". Resolving an identity here
+    # anyway would make the flag do nothing on exactly the developer machines
+    # that have a certificate installed — so CI's build path could never be
+    # reproduced locally, which is where a CI-only break hides.
+    # An explicit TACET_SIGN_IDENTITY still wins: it is the more specific
+    # instruction.
+    :
+elif [[ -z "${SIGN_IDENTITY}" ]]; then
     # A while-read loop rather than `mapfile`: the shebang is /bin/bash, which
     # on macOS is 3.2, where mapfile does not exist. Under `set -e` that is an
     # immediate 127 with a one-line error and no signing context at all.
@@ -44,15 +53,16 @@ if [[ -z "${SIGN_IDENTITY}" ]]; then
         [[ -n "$line" ]] && FOUND+=("$line")
     done < <(resolve_developer_id)
 
+    # Reached only when ALLOW_ADHOC is empty, so neither branch below rechecks it.
     if [[ "${#FOUND[@]}" -eq 1 ]]; then
         SIGN_IDENTITY="${FOUND[0]}"
         echo "==> Resolved Developer ID from the keychain: ${SIGN_IDENTITY}"
-    elif [[ "${#FOUND[@]}" -gt 1 && -z "${ALLOW_ADHOC}" ]]; then
+    elif [[ "${#FOUND[@]}" -gt 1 ]]; then
         echo "ERROR: ${#FOUND[@]} Developer ID Application identities are in the keychain." >&2
         echo "       Pick one and re-run with it:" >&2
         printf '         TACET_SIGN_IDENTITY=%s ./Packaging/build-app.sh\n' "${FOUND[@]}" >&2
         exit 1
-    elif [[ -z "${ALLOW_ADHOC}" ]]; then
+    else
         echo "ERROR: no Developer ID Application identity found in the keychain," >&2
         echo "       and TACET_SIGN_IDENTITY is unset." >&2
         echo >&2
@@ -107,10 +117,17 @@ echo "==> Verifying"
 codesign --verify --deep --strict --verbose=2 "${APP}"
 # --verify is satisfied by an ad-hoc signature, so it cannot answer "is this
 # notarizable / will it keep its TCC grants". Report the type separately.
-if codesign -dvvv "${APP}" 2>&1 | grep -q '^Signature=adhoc'; then
+#
+# The output is captured before being matched, never piped into `grep -q`:
+# grep exits at the first match, codesign takes SIGPIPE, and `set -o pipefail`
+# turns a successful match into a failed pipeline. Piping here silently
+# reported every ad-hoc bundle as signed — the exact bug this check exists to
+# catch. Same shape as the launchctl-list trap elsewhere in this repo.
+SIG_INFO="$(codesign -dvvv "${APP}" 2>&1 || true)"
+if grep -q '^Signature=adhoc' <<<"${SIG_INFO}"; then
     echo "==> Signature type: AD-HOC (not notarizable; TCC grants will not survive a rebuild)"
 else
-    echo "==> Signature type: $(codesign -dvvv "${APP}" 2>&1 | sed -n 's/^Authority=//p' | head -1)"
+    echo "==> Signature type: $(sed -n 's/^Authority=//p' <<<"${SIG_INFO}" | head -1)"
 fi
 echo "==> Entitlements embedded in binary:"
 codesign -d --entitlements :- "${APP}" 2>/dev/null || true

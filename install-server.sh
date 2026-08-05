@@ -124,7 +124,14 @@ check_server_installed() {
   # --verify passes on an ad-hoc signature, so it cannot distinguish the
   # bundle that keeps its TCC grants from the one that loses them on the
   # next rebuild. Report the type, which is the part that decays.
-  if codesign -dvvv "$APP_DST" 2>&1 | grep -q '^Signature=adhoc'; then
+  #
+  # Captured before matching rather than piped into `grep -q`: grep exits at
+  # the first match, codesign takes SIGPIPE, and pipefail turns the match
+  # into a failed pipeline — which would make this check pass every ad-hoc
+  # bundle, exactly what it exists to catch. Same trap as service_listing.
+  local sig_info
+  sig_info="$(codesign -dvvv "$APP_DST" 2>&1 || true)"
+  if grep -q '^Signature=adhoc' <<<"$sig_info"; then
     doctor_fail "the server bundle is signed with a Developer ID (found: ad-hoc)" \
       "rebuild with an identity: TACET_SIGN_IDENTITY=\"Developer ID Application: ...\" ./install-server.sh"
     return 1
