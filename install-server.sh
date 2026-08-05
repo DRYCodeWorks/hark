@@ -121,6 +121,14 @@ check_server_installed() {
       "rebuild it: ./install-server.sh"
     return 1
   fi
+  # --verify passes on an ad-hoc signature, so it cannot distinguish the
+  # bundle that keeps its TCC grants from the one that loses them on the
+  # next rebuild. Report the type, which is the part that decays.
+  if codesign -dvvv "$APP_DST" 2>&1 | grep -q '^Signature=adhoc'; then
+    doctor_fail "the server bundle is signed with a Developer ID (found: ad-hoc)" \
+      "rebuild with an identity: TACET_SIGN_IDENTITY=\"Developer ID Application: ...\" ./install-server.sh"
+    return 1
+  fi
   doctor_pass "the server is installed at ${APP_DST}"
 }
 

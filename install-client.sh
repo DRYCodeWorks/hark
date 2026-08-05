@@ -412,8 +412,17 @@ check_signature() {
       "rebuild it: ./install-client.sh"
     return 1
   fi
+  # --verify above is satisfied by an ad-hoc signature, so on its own it
+  # reported "valid (adhoc)" as a PASS — which is the state that silently
+  # costs the Accessibility and Microphone grants on the next rebuild.
+  # The type is the thing worth checking, not just that verification passed.
+  if codesign -dvvv "$APP_DST" 2>&1 | grep -q '^Signature=adhoc'; then
+    doctor_fail "Tacet.app is signed with a Developer ID (found: ad-hoc)" \
+      "rebuild with an identity: TACET_SIGN_IDENTITY=\"Developer ID Application: ...\" ./install-client.sh"
+    return 1
+  fi
   local identity
-  identity="$(codesign -dvv "$APP_DST" 2>&1 | grep -E '^Signature=' | cut -d= -f2- || true)"
+  identity="$(codesign -dvvv "$APP_DST" 2>&1 | sed -n 's/^Authority=//p' | head -1 || true)"
   doctor_pass "Tacet.app signature is valid (${identity:-unknown})"
 }
 
