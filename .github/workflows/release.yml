@@ -1,0 +1,159 @@
+name: Release
+
+# Tag pushes ONLY. Never `pull_request` — this job holds the Developer ID
+# private key, and a pull_request trigger on a public repo hands that key to
+# anyone who can open a PR. Apple caps Developer ID Application certificates at
+# five per team, ever, and revoking one invalidates everything already signed
+# with it, so the key is a limited non-regenerable asset rather than a
+# rotatable credential.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: macos-latest
+    # A protected Environment is the second lock. Secrets scoped to it are not
+    # readable by any other workflow or job in this repo, and the required
+    # reviewer means landing a malicious workflow change is not by itself
+    # enough to exfiltrate the key.
+    environment: release
+    permissions:
+      contents: write # create the release and upload the asset
+    outputs:
+      sha256: ${{ steps.sign.outputs.sha256 }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0 # the tag annotation becomes the release notes
+
+      - name: Resolve version
+        id: version
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      # The tag says one version and Info.plist says another is a silent
+      # mismatch that ships: the cask pins the tag, the About box shows the
+      # plist, and nothing reconciles them.
+      - name: Check the tag matches Info.plist
+        run: |
+          plist=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+            swift/Packaging/Info.plist)
+          want="${{ steps.version.outputs.version }}"
+          if [[ "$plist" != "$want" ]]; then
+            echo "::error::tag is v$want but Info.plist says $plist"
+            exit 1
+          fi
+
+      - name: Test
+        run: cd swift && swift test
+
+      - name: Sign, notarize and staple
+        id: sign
+        env:
+          DEVELOPER_ID_KEY: ${{ secrets.DEVELOPER_ID_KEY }}
+          DEVELOPER_ID_CERT: ${{ secrets.DEVELOPER_ID_CERT }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          # Notarization is normally 1-5 minutes but the first submission from a
+          # new Team ID took ~50. Let it run; a duplicate submission queues
+          # behind the first and tells you nothing.
+          ci/sign-and-notarize.sh | tee /tmp/sign.log
+          grep '^sha256=' /tmp/sign.log >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # The tag annotation is written at tag time and is already the
+          # human-readable summary of the release, so use it rather than
+          # maintaining a second copy that can disagree with it.
+          git tag -l --format='%(contents)' "$TAG" > /tmp/notes.md
+          if [[ ! -s /tmp/notes.md ]]; then
+            echo "::error::$TAG has no annotation — release notes would be empty."
+            echo "::error::Tag with 'git tag -a', not a lightweight tag."
+            exit 1
+          fi
+          gh release create "$TAG" swift/Packaging/Tacet.zip \
+            --title "tacet $TAG" --notes-file /tmp/notes.md
+
+      - name: Summary
+        run: |
+          {
+            echo "### tacet ${{ steps.version.outputs.tag }} published"
+            echo
+            echo '```'
+            echo "sha256: ${{ steps.sign.outputs.sha256 }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Separate job so it holds a cross-repo token and never the signing key.
+  cask:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open the cask bump PR
+        env:
+          GH_TOKEN: ${{ secrets.TAP_PAT }}
+          VERSION: ${{ needs.release.outputs.version }}
+          SHA256: ${{ needs.release.outputs.sha256 }}
+        run: |
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::warning::TAP_PAT not set — bump the cask by hand:"
+            echo "::warning::version $VERSION, sha256 $SHA256"
+            exit 0
+          fi
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/DRYCodeWorks/homebrew-tap.git" tap
+          cd tap
+          git config user.name "tacet release"
+          git config user.email "dan@drycodeworks.com"
+          branch="bump/tacet-${VERSION//./-}"
+          git checkout -b "$branch"
+
+          # Anchored to the two lines that carry the pin. A loose s/0\.1\.1/…/g
+          # would also rewrite any version named in the caveats or comments.
+          sed -i -E "s/^  version \"[^\"]+\"$/  version \"${VERSION}\"/" Casks/tacet.rb
+          sed -i -E "s/^  sha256 \"[^\"]+\"$/  sha256 \"${SHA256}\"/" Casks/tacet.rb
+
+          if git diff --quiet; then
+            echo "Cask already at ${VERSION}; nothing to do."
+            exit 0
+          fi
+
+          # printf, not a heredoc: every line of a heredoc inside a YAML block
+          # scalar has to stay indented, and that indentation lands in the
+          # commit message.
+          printf '%s\n' \
+            "[tacet] Bump to ${VERSION}" \
+            "" \
+            "Automated from the tacet release workflow. The sha256 is computed" \
+            "from the artifact that was actually uploaded, not a local rebuild," \
+            "so the pin cannot drift from what users download." \
+            "" \
+            "Solves: tacet ${VERSION} release" \
+            "Tests: CI installs the changed cask and execs it" > /tmp/msg.txt
+          git commit -aqF /tmp/msg.txt
+          git push -q origin "$branch"
+
+          printf '%s\n' \
+            "Automated from the [tacet ${VERSION} release](https://github.com/DRYCodeWorks/tacet/releases/tag/v${VERSION})." \
+            "" \
+            "The \`sha256\` is computed from the artifact the release workflow uploaded, so the pin cannot drift from what users download." \
+            "" \
+            "The tap's cask job installs this and execs it." > /tmp/body.md
+          gh pr create --title "[tacet] Bump to ${VERSION}" --body-file /tmp/body.md
