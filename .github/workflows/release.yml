@@ -106,22 +106,44 @@ jobs:
   cask:
     needs: release
     runs-on: ubuntu-latest
+    environment: release # where CASK_APP_PRIVATE_KEY lives
     steps:
+      # A GitHub App rather than a PAT. The token is minted per run and expires
+      # in an hour, so there is nothing to rotate and no release that breaks in
+      # a year because a PAT quietly lapsed — which is the same reason
+      # HarmonicAnalyzer replaced its SUBMODULE_PAT with an App. The App is
+      # installed on homebrew-tap only, and carries contents:write +
+      # pull_requests:write, so a leak of this job cannot reach the other repos.
+      #
+      # Pinned to a SHA, not @v3: this action mints a token that can push to
+      # the tap, so a moving tag would be someone else's code with our write
+      # access.
+      - name: Mint a tap token
+        id: tap-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: "4509007"
+          private-key: ${{ secrets.CASK_APP_PRIVATE_KEY }}
+          owner: DRYCodeWorks
+          repositories: homebrew-tap
+
       - name: Open the cask bump PR
         env:
-          GH_TOKEN: ${{ secrets.TAP_PAT }}
+          GH_TOKEN: ${{ steps.tap-token.outputs.token }}
           VERSION: ${{ needs.release.outputs.version }}
           SHA256: ${{ needs.release.outputs.sha256 }}
         run: |
           if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "::warning::TAP_PAT not set — bump the cask by hand:"
+            echo "::warning::no tap token — bump the cask by hand:"
             echo "::warning::version $VERSION, sha256 $SHA256"
             exit 0
           fi
           git clone "https://x-access-token:${GH_TOKEN}@github.com/DRYCodeWorks/homebrew-tap.git" tap
           cd tap
-          git config user.name "tacet release"
-          git config user.email "dan@drycodeworks.com"
+          # The App's own bot identity, not Dan's. A commit this machine made
+          # should not be attributed to a person who was not at the keyboard.
+          git config user.name "tacet-cask-bump[bot]"
+          git config user.email "4509007+tacet-cask-bump[bot]@users.noreply.github.com"
           branch="bump/tacet-${VERSION//./-}"
           git checkout -b "$branch"
 
