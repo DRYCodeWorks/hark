@@ -527,11 +527,11 @@ fi
 # no matter what grep says, so the check condemned a working binary.
 #
 # BOUNDED, because "does not run" and "does not finish" are different failures
-# and only one of them used to be handled. A bundle can block in dyld before
-# reaching main — Gatekeeper assessment on a bundle in /Applications does
-# exactly this (issue #25) — and an unbounded check then hangs the installer
-# forever with no output, no error, and no service. A verification step that
-# can wedge is worse than no verification step.
+# and only one of them used to be handled. A bundle carrying
+# com.apple.quarantine blocks in dyld before reaching main (issue #25), and an
+# unbounded check then hangs the installer forever with no output, no error,
+# and no service. A verification step that can wedge is worse than no
+# verification step.
 # run_bounded is defined above the source guard so the tests can reach it.
 
 # --help, NOT a bare invocation. `tacet` with no arguments now runs the agent
@@ -544,10 +544,31 @@ verify_rc=$?
 set -e
 
 if [[ "$verify_rc" -eq 124 ]]; then
+  # The headline goes through err(); the rest does not. err() prefixes every
+  # line with ERROR:, and fifteen of those is a wall nobody reads at the moment
+  # they are already stuck.
   err "installed ${APP_DST} but it did not finish starting within 20s."
-  err "The process blocks before reaching main — nothing it logs will say so."
-  err "A bundle in /Applications does this under Gatekeeper assessment (#25);"
-  err "installing to ~/Applications (no cask, no TACET_APP_DIR) is known-good."
+  cat >&2 <<EOF
+
+The process blocks before reaching main, so nothing it logs will say why.
+
+Almost always this is com.apple.quarantine on the bundle (issue #25). Nothing
+launches tacet through LaunchServices — launchd starts it and this script execs
+it — so the first-launch consent gate has nobody to answer it and the process
+waits forever. Notarization does not help; the gate is consent, not assessment.
+
+  xattr -p com.apple.quarantine ${APP_DST}
+
+Removing the attribute does NOT recover this path. The first blocked launch
+wedges the path itself, and neither deleting the xattr nor replacing the bundle
+clears it — only a path that has never wedged:
+
+  rm -rf ${APP_DST}
+  TACET_APP_DIR=~/Applications ./install-server.sh
+
+The Homebrew cask strips quarantine from 0.1.2 on, so a current
+'brew install --cask drycodeworks/tap/tacet' should not reach this message.
+EOF
   exit 1
 fi
 if [[ "$usage_out" != *"usage: tacet"* ]]; then
