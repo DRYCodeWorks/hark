@@ -59,8 +59,8 @@ class TestArgumentHandling:
 class TestVerificationIsBounded:
     """The installed binary is executed to prove it works. That must not hang.
 
-    A bundle can block in dyld before reaching main — Gatekeeper assessment on
-    a bundle in /Applications does exactly that (#25). Unbounded, the installer
+    A bundle carrying com.apple.quarantine blocks in dyld before reaching main
+    (#25) — the consent gate has no UI to answer it. Unbounded, the installer
     waits forever: no output, no error, no service, nothing in any log.
     """
 
@@ -77,6 +77,21 @@ class TestVerificationIsBounded:
         # second one has no output to show, and the fix is different.
         code = SCRIPT.read_text()
         assert 'verify_rc" -eq 124' in code, "the timeout status must be handled"
+
+    def test_the_timeout_message_names_quarantine_and_the_real_recovery(self):
+        # This message is read by someone already stuck, so being wrong here is
+        # expensive. It used to blame /Applications and call ~/Applications
+        # "known-good", which is backwards: a quarantined bundle hangs in
+        # ~/Applications too, and an unquarantined one runs fine in
+        # /Applications. The variable is the xattr, not the directory.
+        code = SCRIPT.read_text()
+        timeout_branch = code[code.index('verify_rc" -eq 124'):code.index("Shared secret")]
+        assert "com.apple.quarantine" in timeout_branch, \
+            "the message must name the actual cause"
+        assert "TACET_APP_DIR" in timeout_branch, \
+            "the message must give a recovery that works"
+        assert "known-good" not in timeout_branch, \
+            "the disproved /Applications-vs-~/Applications advice is back"
 
     def test_the_fallback_exists_because_macos_ships_no_timeout(self):
         # A stock macOS has neither timeout(1) nor gtimeout. Relying on
