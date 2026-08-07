@@ -106,7 +106,13 @@ jobs:
   cask:
     needs: release
     runs-on: ubuntu-latest
-    environment: release # where CASK_APP_PRIVATE_KEY lives
+    # Its OWN environment, deliberately ungated. Sharing `release` would have
+    # been simpler, but that environment carries a required reviewer to guard
+    # the Developer ID key — and inheriting it made every release cost two
+    # approvals when the point was zero. This job never sees the signing key;
+    # it holds a token scoped to homebrew-tap alone, so it does not need the
+    # gate that key earns.
+    environment: cask
     steps:
       # A GitHub App rather than a PAT. The token is minted per run and expires
       # in an hour, so there is nothing to rotate and no release that breaks in
